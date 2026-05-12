@@ -83,18 +83,24 @@ class Editor:
         # 1. Start ImGui Frame
         imgui.new_frame()
         
-        # 2. Define the UI
+        # 2. Define the Main UI
         imgui.set_next_window_position(50, 50, imgui.ALWAYS)
         imgui.begin("Controls", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_ALWAYS_AUTO_RESIZE)
         if imgui.button("Finish CAD"):
             self.finish()
         imgui.end()
 
+        # --- NEW: Draw World Origin (0,0) ---
+        origin_screen = camera.to_screen((0, 0))
+        # Draw a simple Red/Green crosshair for X/Y axes
+        pygame.draw.line(screen, (255, 50, 50), (origin_screen[0] - 15, origin_screen[1]), (origin_screen[0] + 15, origin_screen[1]), 2)
+        pygame.draw.line(screen, (50, 255, 50), (origin_screen[0], origin_screen[1] - 15), (origin_screen[0], origin_screen[1] + 15), 2)
+
         # 3. Draw your CAD lines (World Space)
         for line in self.lines:
             line.draw(screen, camera)
 
-        # 4. Draw preview line (Screen Space)
+        # 4. Draw preview line and Floating Tooltip
         if self.is_drawing and self.start_pos:
             world_mouse = camera.screen_to_world(self.current_mouse_pos)
             target_world_pos = self.snap_engine.get_snapped_pos(
@@ -106,6 +112,28 @@ class Editor:
             
             camera.draw_screen_line(screen, p1_screen, p2_screen, (150, 150, 150), 1)
             camera.draw_circle(screen, (0, 255, 0), p2_screen, 3, 1)
+
+            # --- FIXED SECTION: Use .x and .y instead of [0] and [1] ---
+            dx = target_world_pos.x - self.start_pos.x
+            dy = target_world_pos.y - self.start_pos.y
+            
+            # Use your Point class's built-in distance method
+            length = self.start_pos.distance_to(target_world_pos)
+
+            # --- Floating ImGui Tooltip ---
+            tooltip_x = self.current_mouse_pos[0] + 15
+            tooltip_y = self.current_mouse_pos[1] + 15
+            
+            imgui.set_next_window_position(tooltip_x, tooltip_y, imgui.ALWAYS)
+            imgui.begin("CursorInfo", flags=imgui.WINDOW_NO_TITLE_BAR | 
+                                            imgui.WINDOW_ALWAYS_AUTO_RESIZE | 
+                                            imgui.WINDOW_NO_MOVE | 
+                                            imgui.WINDOW_NO_INPUTS)
+            
+            imgui.text(f"Length: {length:.4f} m")
+            imgui.text(f"dx: {dx:.4f} | dy: {dy:.4f}")
+            imgui.text(f"Pos: ({target_world_pos.x:.2f}, {target_world_pos.y:.2f})")
+            imgui.end()
 
         # 5. Render ImGui on top of everything
         imgui.render()

@@ -576,6 +576,7 @@ class Mesher:
         print(f"DEBUG: edge_map has {boundary_edge_count} boundary candidates.")
         # --- DEBUG END ---
 
+
         for face_idx, (edge_key, cell_ids) in enumerate(edge_map.items()):
             owner[face_idx] = cell_ids[0]
             

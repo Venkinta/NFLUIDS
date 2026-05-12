@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.sparse import lil_matrix
+from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import spsolve
 import scipy.io
 
@@ -71,34 +71,57 @@ class Solver:
         print(f"-------------------------")
         
 
-    def Solve(self, max_iterations=500, tolerance=1e-6):
-        """
-        SIMPLE algorithm main loop
-        """
-        
+    def Solve(self, max_iterations=1000, tolerance=1e-6):
         self.initialize_conditions()
-        
         initial_residuals = None
-    
+        a_P_u,a_P_v = None, None
+
+
         for iteration in range(max_iterations):
-            
             self.U_old = self.U.copy()
             
-            # Step 1: Update fluxes
-            self.SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION()
+            # Step 1: Flux update
+            self.SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(a_P_u,a_P_v)
             
-            # Step 2: Assemble and solve momentum
+            # CHECK 1: Are velocities still finite?
+            if not np.all(np.isfinite(self.U)):
+                print(f"⚠️ NaN/Inf in U before momentum solve at iteration {iteration}")
+                print(f"   U range: [{np.nanmin(self.U)}, {np.nanmax(self.U)}]")
+                break
+            
+            # Step 2: Momentum (This updates a_P_u and a_P_v for the NEXT iteration)
             A_x, b_x, a_P_u = self.assemble_momentum(axis=0)
             A_y, b_y, a_P_v = self.assemble_momentum(axis=1)
             
+            # CHECK 2: Is b finite?
+            if not np.all(np.isfinite(b_x)) or not np.all(np.isfinite(b_y)):
+                print(f"⚠️ NaN/Inf in RHS at iteration {iteration}")
+                break
+            
             u_star, v_star = self.GET_VAR_STAR(A_x, b_x, A_y, b_y)
             
-            # Step 3: Assemble and solve pressure correction
-            A_p, b_p = self.ASSEMBLE_PRESSURE_CORRECTION(a_P_u, a_P_v)
+            # CHECK 3: Is starred velocity finite?
+            if not np.all(np.isfinite(u_star)) or not np.all(np.isfinite(v_star)):
+                print(f"⚠️ NaN/Inf in starred velocity at iteration {iteration}")
+                break
+            
+            # Step 3: Pressure correction (NOW PASSING u_star AND v_star)
+            A_p, b_p = self.ASSEMBLE_PRESSURE_CORRECTION(a_P_u, a_P_v, u_star, v_star)
             p_prime = self.GET_VAR_CORRECTED(A_p, b_p)
             
-            # Step 4: Correct pressure and velocity
+            # CHECK 4: Is p_prime finite?
+            if not np.all(np.isfinite(p_prime)):
+                print(f"⚠️ NaN/Inf in pressure correction at iteration {iteration}")
+                print(f"   b_p range: [{b_p.min()}, {b_p.max()}]")
+                break
+            
+            # Step 4: Velocity correction
             self.CORRECT_PRESSURE_AND_VELOCITY(p_prime, a_P_u, a_P_v, u_star, v_star)
+            
+            # CHECK 5: Is corrected velocity finite?
+            if not np.all(np.isfinite(self.U)):
+                print(f"⚠️ NaN/Inf in corrected U at iteration {iteration}")
+                break
             
             # Step 5: Check convergence
             residual_continuity = np.linalg.norm(b_p)
@@ -119,7 +142,10 @@ class Solver:
             norm_v = residual_v / initial_residuals['v']
             
             max_residual = max(norm_cont, norm_u, norm_v)
-            
+
+            self.health_check(iteration,a_P_u)
+
+
             if iteration % 10 == 0:
                 print(f"Iteration {iteration}: "
                     f"Cont = {norm_cont:.2e}, "
@@ -133,51 +159,70 @@ class Solver:
             print(f"\n⚠ Did not converge in {max_iterations} iterations")
             print(f"Final residuals: {max_residual:.2e}")
 
+
+
+
+        
+
         
     
     def initialize_conditions(self):
-        # Your current code:
+        # Start with a very mild pressure gradient
         self.P = np.ones((self.Nc)) * self.outlet_pressure
         
-        # Better: Set a gradient from inlet to outlet
-        # This gives the solver a better starting point
+        # Start with zero velocity (let the pressure drive the flow)
+        # This is often more stable than guessing 0.6*inlet
+        self.U = np.zeros((self.Nc, 2)) 
+        self.U_old = self.U.copy()
         
-        # Find inlet and outlet cell centers
-        inlet_cells = self.owner[self.inlet_faces]
-        outlet_cells = self.owner[self.outlet_faces]
-        
-        # Calculate a rough pressure gradient
-        # (This is just an initial guess, solver will correct it)
-        x_coords = self.cell_centers[:, 0]
-        x_min, x_max = x_coords.min(), x_coords.max()
-        
-        # Linear pressure drop from inlet to outlet
-        self.P = self.outlet_pressure + (x_max - x_coords) / (x_max - x_min) * 10.0
-        
-        self.U = np.ones((self.Nc, 2)) * self.inlet_velocity * 0.6
-        
-        # Face mass flux
         self.phi = np.zeros(self.Nf)
         self.diff = np.zeros(self.Nf)
         
+        # Important: Call flux update once to initialize self.phi for the first pressure solve
+        self.SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION()
+        
 
 
 
-    def SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(self):
+    def SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(self, a_P_u=None, a_P_v=None):
+        grad_P = self.calculate_pressure_gradients()
         
-        owner = self.owner[self.internal_faces]
-        neighbor = self.neighbor[self.internal_faces]
-        U_interp = (self.U[owner] + self.U[neighbor])/2 # IMPORTANT: DECISION TO USE CENTRAL DIFFERENCING
+        f_int = self.internal_faces
+        own = self.owner[f_int]
+        nei = self.neighbor[f_int]
         
+        # 1. Interpolated Velocity Flux
+        U_interp = (self.U[own] + self.U[nei]) / 2.0
+        phi_star = self.rho * np.sum(U_interp * self.Sf[f_int], axis=1)
         
-        
-        self.phi[self.internal_faces] = self.rho * np.sum(U_interp * self.Sf[self.internal_faces],axis=1) #phi[f] = rho * u_face · n_face * |Sf|
-        
-        self.phi[self.inlet_faces] = self.rho * np.sum(self.inlet_velocity * self.Sf[self.inlet_faces],axis=1)
-        
-        self.phi[self.outlet_faces] = self.rho * np.sum(self.U[self.owner[self.outlet_faces]] * self.Sf[self.outlet_faces],axis=1)
-        
-        self.phi[self.wall_faces] = 0 # redundancy
+        if a_P_u is not None:
+            # 2. Rhie-Chow Correction
+            # Use the average of the RELAXED a_P from the momentum solve
+            a_P_f = 0.5 * (a_P_u[own] + a_P_u[nei] + a_P_v[own] + a_P_v[nei]) / 2.0
+            a_P_f = np.maximum(a_P_f, 0.1) # Start with 0.1 or 1.0; tune as needed
+            
+            # Grad P interpolated to face
+            gradP_f_interp = 0.5 * (grad_P[own] + grad_P[nei])
+            # Project interpolated gradient onto face normal unit vector
+            n_f = self.Sf[f_int] / self.magSf[f_int][:, None]
+            dp_interp = np.sum(gradP_f_interp * n_f, axis=1)
+            
+            # Actual pressure difference across face
+            dp_actual = (self.P[nei] - self.P[own]) / self.magDf[f_int]
+            
+            # Correction term: D_f * (gradP_interpolated - gradP_actual)
+            # Note: D_f here is Vol_f / a_P_f. Since it's 2D, we use Area.
+            vol_f = 0.5 * (self.cell_areas[own] + self.cell_areas[nei])
+            D_f = vol_f / a_P_f
+            
+            self.phi[f_int] = phi_star + self.rho * D_f * (dp_interp - dp_actual) * self.magSf[f_int]
+        else:
+            self.phi[f_int] = phi_star
+
+        # Boundary Fluxes (Remaining unchanged)
+        self.phi[self.inlet_faces] = self.rho * np.sum(self.inlet_velocity * self.Sf[self.inlet_faces], axis=1)
+        self.phi[self.outlet_faces] = self.rho * np.sum(self.U[self.owner[self.outlet_faces]] * self.Sf[self.outlet_faces], axis=1)
+        self.phi[self.wall_faces] = 0.0
         
         
         
@@ -189,14 +234,27 @@ class Solver:
         self.diff[self.outlet_faces] = 0
         
         self.diff[self.wall_faces] = self.viscosity * (self.magSf[self.wall_faces])/(self.magDf[self.wall_faces])
+
+
+
+        # --- NEW: GLOBAL MASS CONSERVATION ---
+        # Calculate total mass in and out
+        sum_in = np.sum(self.phi[self.inlet_faces])   # Usually negative (flow in)
+        sum_out = np.sum(self.phi[self.outlet_faces]) # Usually positive (flow out)
+        
+        if abs(sum_out) > 1e-12:
+            scale = -sum_in / sum_out
+            # Adjust outlet fluxes to match inlet
+            self.phi[self.outlet_faces] *= scale
         
         
     
     def assemble_momentum(self, axis):
-        A = lil_matrix((self.Nc, self.Nc))
+  
+        
         b = np.zeros(self.Nc)
         
-        # --- 1. INTERNAL FACES ---
+        # --- INTERNAL FACES ---
         f_int = self.internal_faces
         own_i = self.owner[f_int]
         nei_i = self.neighbor[f_int]
@@ -204,182 +262,169 @@ class Solver:
         F = self.phi[f_int]
         D = self.diff[f_int]
         
-        pos = F >= 0
-        neg = ~pos
+        # Build coordinate lists for COO matrix
+        rows = []
+        cols = []
+        data = []
         
-        # Owner/Neighbor contributions (Upwind + Diffusion)
-        A[own_i[pos], own_i[pos]] += F[pos] + D[pos]
-        A[own_i[pos], nei_i[pos]] += -D[pos]
-        A[nei_i[pos], nei_i[pos]] += D[pos]
-        A[nei_i[pos], own_i[pos]] += -F[pos] - D[pos]
-
-        A[own_i[neg], own_i[neg]] += D[neg]
-        A[own_i[neg], nei_i[neg]] += -D[neg] - F[neg]
-        A[nei_i[neg], nei_i[neg]] += -F[neg] + D[neg]
-        A[nei_i[neg], own_i[neg]] += -D[neg]
+        # Upwind convection + diffusion
+        # Owner diagonal
+        rows.append(own_i)
+        cols.append(own_i)
+        data.append(np.maximum(F, 0) + D)
         
-        # --- 2. BOUNDARY FACES ---
+        # Owner-neighbor coupling
+        rows.append(own_i)
+        cols.append(nei_i)
+        data.append(-(np.maximum(-F, 0) + D))
+        
+        # Neighbor diagonal
+        rows.append(nei_i)
+        cols.append(nei_i)
+        data.append(np.maximum(-F, 0) + D)
+        
+        # Neighbor-owner coupling
+        rows.append(nei_i)
+        cols.append(own_i)
+        data.append(-(np.maximum(F, 0) + D))
+        
+        # --- BOUNDARY FACES ---
         # Inlet
         f_in = self.inlet_faces
         own_in = self.owner[f_in]
-        A[own_in, own_in] += self.diff[f_in]
-        b[own_in] += self.diff[f_in] * self.inlet_velocity[axis]
+        D_in = self.diff[f_in]
+        F_in = self.phi[f_in] # Grab the face flux
         
-        # Wall (No-slip: b += 0)
+        rows.append(own_in)
+        cols.append(own_in)
+        data.append(D_in)
+        
+        # Upwind convection + diffusion for the source term
+        b[own_in] += (D_in - F_in) * self.inlet_velocity[axis]
+        
+        # Wall
         f_w = self.wall_faces
         own_w = self.owner[f_w]
-        A[own_w, own_w] += self.diff[f_w]
-
-        # --- 3. PRESSURE GRADIENT (The source of the crash) ---
-        p_face = np.zeros(self.Nf)
+        D_w = self.diff[f_w]
         
-        # Correctly use the specific indices for each face type
+        rows.append(own_w)
+        cols.append(own_w)
+        data.append(D_w)
+        
+        # --- PRESSURE GRADIENT ---
+        p_face = np.zeros(self.Nf)
         p_face[f_int] = 0.5 * (self.P[own_i] + self.P[nei_i])
-        p_face[f_in] = self.P[own_in] 
+        p_face[f_in] = self.P[own_in]
         p_face[self.outlet_faces] = self.outlet_pressure
         p_face[f_w] = self.P[own_w]
-
-        # Vectorized force: b = -sum(P_f * Sf)
-        # This remains the same, but now p_face is correctly sized
+        
         np.add.at(b, self.owner, -p_face * self.Sf[:, axis])
         np.add.at(b, self.neighbor[f_int], p_face[f_int] * self.Sf[f_int, axis])
         
-        # --- 4. UNDER-RELAXATION ---
-        A_csr = A.tocsr()
-        a_P = A_csr.diagonal().copy()
-        alpha_u = 0.3
+        # --- CREATE COO MATRIX ---
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        data = np.concatenate(data)
         
-        A_diag = a_P/alpha_u
-        A_csr.setdiag(A_diag)
+        A = coo_matrix((data, (rows, cols)), shape=(self.Nc, self.Nc))
+        A_csr = A.tocsr()
+        
+        # --- UNDER-RELAXATION ---
+        a_P_original = A_csr.diagonal().copy()
+        alpha_u = 0.5
+        
+        A_diag_relaxed = a_P_original / alpha_u
+        A_csr.setdiag(A_diag_relaxed)
         
         if hasattr(self, 'U_old'):
-            b += (1 - alpha_u) / alpha_u * a_P * self.U_old[:, axis]
-            
-            
-            
-            # --- DIAGNOSTIC CHECK ---
-        zero_diags = np.where(a_P == 0)[0]
-        if len(zero_diags) > 0:
-            print(f"CRITICAL WARNING: Found {len(zero_diags)} cells with a_P = 0.0 in Momentum!")
-            print(f"Cell IDs: {zero_diags[:10]}...") # Print first 10
-            
-            # Temporary hack to prevent nan division: give them a tiny fake value
-            a_P[zero_diags] = 1e-10 
-            
-            # We also need to fix the A matrix diagonal so spsolve doesn't crash
-            A_diag = A_csr.diagonal()
-            A_diag[zero_diags] = 1e-10
-            A_csr.setdiag(A_diag)
-            
-
+            b += ((1 - alpha_u) / alpha_u) * a_P_original * self.U_old[:, axis]
         
-        # === ADD THIS DEBUG CHECK ===
-        print(f"\n=== MOMENTUM MATRIX DEBUG (axis={axis}) ===")
-        print(f"Matrix shape: {A_csr.shape}")
-        print(f"Non-zeros: {A_csr.nnz}")
-        print(f"Diagonal min/max: {a_P.min():.6e} / {a_P.max():.6e}")
-        
-        # Find cells with zero diagonal (disconnected!)
-        zero_diag = np.where(a_P == 0)[0]
-        if len(zero_diag) > 0:
-            print(f"⚠️  WARNING: {len(zero_diag)} cells have ZERO diagonal!")
-            print(f"    First few: {zero_diag[:10]}")
-        
-        # Check if any rows are completely empty
-        row_sums = np.array(np.abs(A_csr).sum(axis=1)).flatten()
-        empty_rows = np.where(row_sums == 0)[0]
-        if len(empty_rows) > 0:
-            print(f"⚠️  CRITICAL: {len(empty_rows)} rows are COMPLETELY EMPTY!")
-            print(f"    Cells: {empty_rows[:10]}")
-                                                        
-        return A_csr, b, a_P
+        return A_csr, b, a_P_original                                          
             
             
-    def GET_VAR_STAR(self, A_u,b_u,A_v,b_v):
-        
+    def GET_VAR_STAR(self, A_u, b_u, A_v, b_v):
         u_star = spsolve(A_u, b_u)
         v_star = spsolve(A_v, b_v)
         
-        return u_star,v_star
+        # --- VELOCITY CLAMPING ---
+        # Prevents the "Iteration 2 Explosion" 
+        # Don't let the velocity exceed 5x the inlet velocity in early iterations
+        v_max = np.linalg.norm(self.inlet_velocity) * 5.0
+        u_star = np.clip(u_star, -v_max, v_max)
+        v_star = np.clip(v_star, -v_max, v_max)
+        
+        return u_star, v_star
     
-    def ASSEMBLE_PRESSURE_CORRECTION(self, a_P_u, a_P_v):
-        A = lil_matrix((self.Nc, self.Nc))
+    def ASSEMBLE_PRESSURE_CORRECTION(self, a_P_u, a_P_v, u_star, v_star):
+                
         b = np.zeros(self.Nc)
+        
+        # Combine starred velocities into a 2D array for easy dot products
+        U_star_combined = np.column_stack((u_star, v_star))
         
         # --- 1. INTERNAL FACES ---
         f_int = self.internal_faces
         own_int = self.owner[f_int]
         nei_int = self.neighbor[f_int]
         
-        d_f_int =  ( (self.Sf[f_int,0]**2)/a_P_u[own_int] + (self.Sf[f_int,1]**2)/a_P_v[own_int] )
+        d_f_int = (self.Sf[f_int, 0]**2) / a_P_u[own_int] + (self.Sf[f_int, 1]**2) / a_P_v[own_int]
         
-        for i, f in enumerate(f_int):
-            A[own_int[i], own_int[i]] += d_f_int[i]
-            A[own_int[i], nei_int[i]] -= d_f_int[i]
-            A[nei_int[i], nei_int[i]] += d_f_int[i]
-            A[nei_int[i], own_int[i]] -= d_f_int[i]
-            
-        # Mass imbalance (Internal)
-        U_interp = (self.U[own_int] + self.U[nei_int]) / 2.0
+        rows = [own_int, own_int, nei_int, nei_int]
+        cols = [own_int, nei_int, nei_int, own_int]
+        data = [d_f_int, -d_f_int, d_f_int, -d_f_int]
+        
+        # Mass imbalance using U* (FIXED)
+        U_interp = (U_star_combined[own_int] + U_star_combined[nei_int]) / 2.0
         mass_flux_int = self.rho * np.sum(U_interp * self.Sf[f_int], axis=1)
         np.add.at(b, own_int, -mass_flux_int)
         np.add.at(b, nei_int, mass_flux_int)
-
+        
         # --- 2. INLET FACES ---
         f_in = self.inlet_faces
         if len(f_in) > 0:
             own_in = self.owner[f_in]
-            d_f_in =  ( (self.Sf[f_in,0]**2)/a_P_u[own_in] + (self.Sf[f_in,1]**2)/a_P_v[own_in] )
-            for i, f in enumerate(f_in):
-                A[own_in[i], own_in[i]] += d_f_in[i]
+            d_f_in = (self.Sf[f_in, 0]**2) / a_P_u[own_in] + (self.Sf[f_in, 1]**2) / a_P_v[own_in]
+            
+            rows.append(own_in)
+            cols.append(own_in)
+            data.append(d_f_in)
             
             mass_flux_in = self.rho * np.sum(self.inlet_velocity * self.Sf[f_in], axis=1)
             np.add.at(b, own_in, -mass_flux_in)
-
-        # --- 3. OUTLET FACES (The "Pin") ---
+        
+        # --- 3. OUTLET FACES ---
         f_out = self.outlet_faces
         if len(f_out) > 0:
             own_out = self.owner[f_out]
-            # USE UNIQUE NAMES HERE TO AVOID THE BROADCAST ERROR
-            Sf_x_out = self.Sf[f_out, 0]
-            Sf_y_out = self.Sf[f_out, 1]
+            d_f_out = (self.Sf[f_out, 0]**2) / a_P_u[own_out] + (self.Sf[f_out, 1]**2) / a_P_v[own_out]
             
-            d_f_out =  ( (Sf_x_out**2)/a_P_u[own_out] + (Sf_y_out**2)/a_P_v[own_out] )
+            rows.append(own_out)
+            cols.append(own_out)
+            data.append(d_f_out)
             
-            for i, f in enumerate(f_out):
-                A[own_out[i], own_out[i]] += d_f_out[i]
-                
-            mass_flux_out = self.rho * np.sum(self.U[own_out] * self.Sf[f_out], axis=1)
+            # Mass flux using U* (FIXED)
+            mass_flux_out = self.rho * np.sum(U_star_combined[own_out] * self.Sf[f_out], axis=1)
             np.add.at(b, own_out, -mass_flux_out)
-
+        
         # --- 4. WALL FACES ---
         f_w = self.wall_faces
         if len(f_w) > 0:
             own_w = self.owner[f_w]
-            d_f_w =  ( (self.Sf[f_w,0]**2)/a_P_u[own_w] + (self.Sf[f_w,1]**2)/a_P_v[own_w] )
-            for i, f in enumerate(f_w):
-                A[own_w[i], own_w[i]] += d_f_w[i]
-                
-                
-        A_csr = A.tocsr()        
-        print(f"\n=== PRESSURE MATRIX DEBUG ===")
-        print(f"Matrix shape: {A_csr.shape}")
-        print(f"Non-zeros: {A_csr.nnz}")
+            d_f_w = (self.Sf[f_w, 0]**2) / a_P_u[own_w] + (self.Sf[f_w, 1]**2) / a_P_v[own_w]
+            
+            rows.append(own_w)
+            cols.append(own_w)
+            data.append(d_f_w)
         
-        diag = A_csr.diagonal()
-        print(f"Diagonal min/max: {diag.min():.6e} / {diag.max():.6e}")
+        # --- 5. CREATE COO MATRIX ---
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        data = np.concatenate(data)
         
-        zero_diag = np.where(diag == 0)[0]
-        if len(zero_diag) > 0:
-            print(f"⚠️  {len(zero_diag)} cells have ZERO diagonal in pressure matrix!")
+        A = coo_matrix((data, (rows, cols)), shape=(self.Nc, self.Nc))
+        A_csr = A.tocsr()
         
-        # Check outlet contribution
-        own_outlet = self.owner[self.outlet_faces]
-        print(f"Outlet cells: {own_outlet}")
-        print(f"Outlet diagonals: {diag[own_outlet]}")  
-                
-
-        return A.tocsr(), b
+        return A_csr, b
     
     def GET_VAR_CORRECTED(self, A_p, b_p):
 
@@ -389,90 +434,66 @@ class Solver:
     
     
     def CORRECT_PRESSURE_AND_VELOCITY(self, p_prime, a_P_u, a_P_v, u_star, v_star):
-        """
-        Apply pressure and velocity corrections (Fully Vectorized)
-        """
-        # Under-relaxation factors
-        alpha_p = 0.1  # Pressure (conservative)
+        alpha_p = 0.3
         
-        # --- 1. UPDATE PRESSURE ---
+        # 1. Update Cell Pressure
         self.P += alpha_p * p_prime
+        self.P -= (np.mean(self.P[self.owner[self.outlet_faces]]) - self.outlet_pressure)
         
-        # --- 2. CORRECT VELOCITY ---
-        # Initialize correction arrays
-        u_correction = np.zeros(self.Nc)
-        v_correction = np.zeros(self.Nc)
-        correction_count = np.zeros(self.Nc) 
+        # 2. Calculate Gradient of p_prime
+        P_tmp = self.P.copy()
+        self.P = p_prime
+        grad_p_prime = self.calculate_pressure_gradients(is_correction=True) # (FIXED)
+        self.P = P_tmp 
         
-        # ==========================================
-        # INTERNAL FACES
-        # ==========================================
+        # 3. Correct Velocity
+        self.U[:, 0] = u_star - (self.cell_areas / a_P_u) * grad_p_prime[:, 0]
+        self.U[:, 1] = v_star - (self.cell_areas / a_P_v) * grad_p_prime[:, 1]
+        
+
+
+    def calculate_pressure_gradients(self, is_correction=False):
+        grad_P = np.zeros((self.Nc, 2))
+        
+        # Internal
         f_int = self.internal_faces
-        own_int = self.owner[f_int]
-        nei_int = self.neighbor[f_int]
+        own, nei = self.owner[f_int], self.neighbor[f_int]
+        P_f = 0.5 * (self.P[own] + self.P[nei])
         
-        # Gradients and Normals
-        dp_prime_int = p_prime[nei_int] - p_prime[own_int]
-        grad_p_prime_int = dp_prime_int / self.magDf[f_int]
-        
-        n_x_int = self.Sf[f_int, 0] / self.magSf[f_int]
-        n_y_int = self.Sf[f_int, 1] / self.magSf[f_int]
-        
-        # Corrections for Owner cells
-        d_u_own = self.magSf[f_int] / a_P_u[own_int]
-        d_v_own = self.magSf[f_int] / a_P_v[own_int]
-        
-        u_corr_own = -d_u_own * grad_p_prime_int * n_x_int
-        v_corr_own = -d_v_own * grad_p_prime_int * n_y_int
-        
-        # Corrections for Neighbor cells (opposite gradient push)
-        d_u_nei = self.magSf[f_int] / a_P_u[nei_int]
-        d_v_nei = self.magSf[f_int] / a_P_v[nei_int]
-        
-        u_corr_nei = d_u_nei * grad_p_prime_int * n_x_int
-        v_corr_nei = d_v_nei * grad_p_prime_int * n_y_int
-        
-        # Accumulate using np.add.at (crucial for cells with multiple faces)
-        np.add.at(u_correction, own_int, u_corr_own)
-        np.add.at(v_correction, own_int, v_corr_own)
-        np.add.at(correction_count, own_int, 1)
-        
-        np.add.at(u_correction, nei_int, u_corr_nei)
-        np.add.at(v_correction, nei_int, v_corr_nei)
-        np.add.at(correction_count, nei_int, 1)
-
-        # ==========================================
-        # BOUNDARY FACES (Inlets, Outlets, Walls)
-        # ==========================================
+        for i in range(2):
+            np.add.at(grad_P[:, i], own, P_f * self.Sf[f_int, i])
+            np.add.at(grad_P[:, i], nei, -P_f * self.Sf[f_int, i])
+            
+        # Boundaries
         f_bnd = np.concatenate([self.inlet_faces, self.outlet_faces, self.wall_faces])
-        own_bnd = self.owner[f_bnd]
+        own_b = self.owner[f_bnd]
         
-        # For boundaries, assume p_prime_boundary = 0
-        dp_prime_bnd = 0.0 - p_prime[own_bnd]
-        grad_p_prime_bnd = dp_prime_bnd / self.magDf[f_bnd]
+        P_f_b = self.P[own_b].copy() # Ensure we don't alter the actual P array
+        is_outlet = np.isin(f_bnd, self.outlet_faces)
         
-        n_x_bnd = self.Sf[f_bnd, 0] / self.magSf[f_bnd]
-        n_y_bnd = self.Sf[f_bnd, 1] / self.magSf[f_bnd]
+        # (FIXED) Force p' to 0 at the boundary if we are calculating correction gradients
+        if is_correction:
+            P_f_b[is_outlet] = 0.0
+        else:
+            P_f_b[is_outlet] = self.outlet_pressure
         
-        d_u_bnd = self.magSf[f_bnd] / a_P_u[own_bnd]
-        d_v_bnd = self.magSf[f_bnd] / a_P_v[own_bnd]
-        
-        u_corr_bnd = -d_u_bnd * grad_p_prime_bnd * n_x_bnd
-        v_corr_bnd = -d_v_bnd * grad_p_prime_bnd * n_y_bnd
-        
-        # Accumulate boundary contributions
-        np.add.at(u_correction, own_bnd, u_corr_bnd)
-        np.add.at(v_correction, own_bnd, v_corr_bnd)
-        np.add.at(correction_count, own_bnd, 1)
+        for i in range(2):
+            np.add.at(grad_P[:, i], own_b, P_f_b * self.Sf[f_bnd, i])
+            
+        grad_P /= self.cell_areas[:, None]
+        return grad_P
+    
 
-        # ==========================================
-        # APPLY AVERAGED CORRECTIONS
-        # ==========================================
-        # Avoid division by zero for any disconnected cells
-        correction_count[correction_count == 0] = 1 
-        
-        u_correction /= correction_count
-        v_correction /= correction_count
-        
-        self.U[:, 0] = u_star + u_correction
-        self.U[:, 1] = v_star + v_correction
+
+    def health_check(self, iteration, a_P_u):
+            print(f"\n--- Health Check Iteration {iteration} ---")
+            print(f"  U range:    [{np.nanmin(self.U):.2e}, {np.nanmax(self.U):.2e}]")
+            print(f"  P range:    [{np.nanmin(self.P):.2e}, {np.nanmax(self.P):.2e}]")
+            print(f"  Phi range:  [{np.nanmin(self.phi):.2e}, {np.nanmax(self.phi):.2e}]")
+            
+            # (FIXED) Use passed a_P_u instead of rebuilding the whole matrix
+            diag_min = np.min(a_P_u)
+            print(f"  Min a_P:    {diag_min:.2e}")
+            
+            print(f"  Max grad_P: {np.max(np.abs(self.calculate_pressure_gradients())):.2e}")
+            print(f"---------------------------------\n")
