@@ -3,12 +3,14 @@ from OpenGL.GL import *
 import math
 
 class Camera:
-    def __init__(self, scale=1.0, offset=None):
+    def __init__(self, scale=2.0, offset=None):
+        # scale = pixels per world-unit (world units = mm by default)
+        # scale=2.0 means 1mm = 2px  →  1280px screen shows 640mm wide
         self.scale = scale
         self.offset = offset if offset is not None else [0.0, 0.0]
 
     def to_screen(self, world_point):
-        """Converts World (Meters) to Screen (Pixels)."""
+        """Converts World (mm) to Screen (Pixels)."""
         px = world_point.x if hasattr(world_point, 'x') else world_point[0]
         py = world_point.y if hasattr(world_point, 'y') else world_point[1]
         
@@ -17,7 +19,7 @@ class Camera:
         return (sx, sy)
 
     def screen_to_world(self, screen_pos):
-        """Converts Screen (Pixels) to World (Meters)."""
+        """Converts Screen (Pixels) to World (mm)."""
         sx, sy = screen_pos
         wx = (sx / self.scale) - self.offset[0]
         wy = (sy / self.scale) - self.offset[1]
