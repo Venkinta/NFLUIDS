@@ -186,159 +186,124 @@ class Solver:
 
     def SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(self, a_P_u=None, a_P_v=None):
         grad_P = self.calculate_pressure_gradients()
-        
+
         f_int = self.internal_faces
-        own = self.owner[f_int]
-        nei = self.neighbor[f_int]
-        
-        # 1. Interpolated Velocity Flux
-        U_interp = (self.U[own] + self.U[nei]) / 2.0
-        phi_star = self.rho * np.sum(U_interp * self.Sf[f_int], axis=1)
-        
+        own   = self.owner[f_int]
+        nei   = self.neighbor[f_int]
+
+        U_interp  = (self.U[own] + self.U[nei]) / 2.0
+        phi_star  = self.rho * np.sum(U_interp * self.Sf[f_int], axis=1)
+
         if a_P_u is not None:
-            # 2. Rhie-Chow Correction
-            # Use the average of the RELAXED a_P from the momentum solve
-            a_P_f = 0.5 * (a_P_u[own] + a_P_u[nei] + a_P_v[own] + a_P_v[nei]) / 2.0
-            a_P_f = np.maximum(a_P_f, 1e-10) # Start with 0.1 or 1.0; tune as needed
-            
-            # Grad P interpolated to face
-            gradP_f_interp = 0.5 * (grad_P[own] + grad_P[nei])
-            # Project interpolated gradient onto face normal unit vector
-            n_f = self.Sf[f_int] / self.magSf[f_int][:, None]
-            dp_interp = np.sum(gradP_f_interp * n_f, axis=1)
-            
-            # Actual pressure difference across face
-            dp_actual = (self.P[nei] - self.P[own]) / self.magDf[f_int]
-            
-            # Correction term: D_f * (gradP_interpolated - gradP_actual)
-            # Note: D_f here is Vol_f / a_P_f. Since it's 2D, we use Area.
-            vol_f = 0.5 * (self.cell_areas[own] + self.cell_areas[nei])
-            D_f = vol_f / a_P_f
-            
+            a_P_f         = 0.5 * (a_P_u[own] + a_P_u[nei] + a_P_v[own] + a_P_v[nei]) / 2.0
+            a_P_f         = np.maximum(a_P_f, 1e-10)
+            gradP_f_interp= 0.5 * (grad_P[own] + grad_P[nei])
+            n_f           = self.Sf[f_int] / self.magSf[f_int][:, None]
+            dp_interp     = np.sum(gradP_f_interp * n_f, axis=1)
+            dp_actual     = (self.P[nei] - self.P[own]) / self.magDf[f_int]
+            vol_f         = 0.5 * (self.cell_areas[own] + self.cell_areas[nei])
+            D_f           = vol_f / a_P_f
             self.phi[f_int] = phi_star + self.rho * D_f * (dp_interp - dp_actual) * self.magSf[f_int]
         else:
             self.phi[f_int] = phi_star
 
-        # Boundary Fluxes (Remaining unchanged)
-        self.phi[self.inlet_faces] = self.rho * np.sum(self.inlet_velocity * self.Sf[self.inlet_faces], axis=1)
-        self.phi[self.outlet_faces] = self.rho * np.sum(self.U[self.owner[self.outlet_faces]] * self.Sf[self.outlet_faces], axis=1)
-        self.phi[self.wall_faces] = 0.0
-        
-        
-        
+        self.phi[self.inlet_faces]  = self.rho * np.sum(self.inlet_velocity * self.Sf[self.inlet_faces], axis=1)
+        self.phi[self.wall_faces]   = 0.0
 
-        self.diff[self.internal_faces] = self.viscosity * (self.magSf[self.internal_faces])/(self.magDf[self.internal_faces])
-        
-        self.diff[self.inlet_faces] = self.viscosity * (self.magSf[self.inlet_faces])/(self.magDf[self.inlet_faces])
-        
-        self.diff[self.outlet_faces] = 0
-        
-        self.diff[self.wall_faces] = self.viscosity * (self.magSf[self.wall_faces])/(self.magDf[self.wall_faces])
+        # FIX: Use actual cell velocity for outlet phi — removing the post-hoc global
+        # scaling that created a phi/U inconsistency feeding into the pressure correction.
+        own_out = self.owner[self.outlet_faces]
+        self.phi[self.outlet_faces] = self.rho * np.sum(
+            self.U[own_out] * self.Sf[self.outlet_faces], axis=1)
 
+        self.diff[self.internal_faces] = (
+            self.viscosity * self.magSf[self.internal_faces] / self.magDf[self.internal_faces])
+        self.diff[self.inlet_faces]    = (
+            self.viscosity * self.magSf[self.inlet_faces]    / self.magDf[self.inlet_faces])
+        self.diff[self.outlet_faces]   = 0.0
+        self.diff[self.wall_faces]     = (
+            self.viscosity * self.magSf[self.wall_faces]     / self.magDf[self.wall_faces])
 
-
-        # --- NEW: GLOBAL MASS CONSERVATION ---
-        # Calculate total mass in and out
-        sum_in = np.sum(self.phi[self.inlet_faces])   # Usually negative (flow in)
-        sum_out = np.sum(self.phi[self.outlet_faces]) # Usually positive (flow out)
-        
-        if abs(sum_out) > 1e-12:
-            scale = -sum_in / sum_out
-            # Adjust outlet fluxes to match inlet
-            self.phi[self.outlet_faces] *= scale
+        # NOTE: Removed global mass-conservation phi scaling.
+        # That scaling set phi[outlet] to satisfy continuity on paper, but left U[outlet]
+        # wrong, causing ASSEMBLE_PRESSURE_CORRECTION to see a persistent spurious
+        # mass imbalance. The pressure solver should be the thing that enforces continuity.
         
         
     
     def assemble_momentum(self, axis):
-  
-        
+
         b = np.zeros(self.Nc)
-        
+
         # --- INTERNAL FACES ---
         f_int = self.internal_faces
         own_i = self.owner[f_int]
         nei_i = self.neighbor[f_int]
-        
+
         F = self.phi[f_int]
         D = self.diff[f_int]
-        
-        # Build coordinate lists for COO matrix
+
         rows = []
         cols = []
         data = []
-        
-        # Upwind convection + diffusion
-        # Owner diagonal
-        rows.append(own_i)
-        cols.append(own_i)
-        data.append(np.maximum(F, 0) + D)
-        
-        # Owner-neighbor coupling
-        rows.append(own_i)
-        cols.append(nei_i)
-        data.append(-(np.maximum(-F, 0) + D))
-        
-        # Neighbor diagonal
-        rows.append(nei_i)
-        cols.append(nei_i)
-        data.append(np.maximum(-F, 0) + D)
-        
-        # Neighbor-owner coupling
-        rows.append(nei_i)
-        cols.append(own_i)
-        data.append(-(np.maximum(F, 0) + D))
-        
-        # --- BOUNDARY FACES ---
-        # Inlet
-        f_in = self.inlet_faces
+
+        # Upwind convection + diffusion (unchanged)
+        rows.append(own_i);  cols.append(own_i);  data.append(np.maximum(F, 0) + D)
+        rows.append(own_i);  cols.append(nei_i);  data.append(-(np.maximum(-F, 0) + D))
+        rows.append(nei_i);  cols.append(nei_i);  data.append(np.maximum(-F, 0) + D)
+        rows.append(nei_i);  cols.append(own_i);  data.append(-(np.maximum(F, 0) + D))
+
+        # --- INLET (unchanged) ---
+        f_in   = self.inlet_faces
         own_in = self.owner[f_in]
-        D_in = self.diff[f_in]
-        F_in = self.phi[f_in] # Grab the face flux
-        
-        rows.append(own_in)
-        cols.append(own_in)
-        data.append(D_in)
-        
-        # Upwind convection + diffusion for the source term
+        D_in   = self.diff[f_in]
+        F_in   = self.phi[f_in]
+        rows.append(own_in); cols.append(own_in); data.append(D_in)
         b[own_in] += (D_in - F_in) * self.inlet_velocity[axis]
-        
-        # Wall
-        f_w = self.wall_faces
+
+        # --- WALL (unchanged) ---
+        f_w   = self.wall_faces
         own_w = self.owner[f_w]
-        D_w = self.diff[f_w]
-        
-        rows.append(own_w)
-        cols.append(own_w)
-        data.append(D_w)
-        
-        # --- PRESSURE GRADIENT ---
-        p_face = np.zeros(self.Nf)
-        p_face[f_int] = 0.5 * (self.P[own_i] + self.P[nei_i])
-        p_face[f_in] = self.P[own_in]
-        p_face[self.outlet_faces] = self.outlet_pressure
-        p_face[f_w] = self.P[own_w]
-        
-        np.add.at(b, self.owner, -p_face * self.Sf[:, axis])
-        np.add.at(b, self.neighbor[f_int], p_face[f_int] * self.Sf[f_int, axis])
-        
-        # --- CREATE COO MATRIX ---
+        D_w   = self.diff[f_w]
+        rows.append(own_w); cols.append(own_w); data.append(D_w)
+
+        # --- OUTLET: FIX — add zero-gradient convective stabilisation ---
+        # Previously nothing was added here, leaving outlet cells under-constrained.
+        # For a zero-gradient (convective) outlet: the outgoing flux adds to the diagonal.
+        f_out   = self.outlet_faces
+        if len(f_out) > 0:
+            own_out = self.owner[f_out]
+            F_out   = self.phi[f_out]
+            # Outgoing flux (phi > 0) contributes to diagonal; no diffusion, no source.
+            rows.append(own_out)
+            cols.append(own_out)
+            data.append(np.maximum(F_out, 0))
+
+        # --- PRESSURE GRADIENT (unchanged) ---
+        p_face          = np.zeros(self.Nf)
+        p_face[f_int]   = 0.5 * (self.P[own_i] + self.P[nei_i])
+        p_face[f_in]    = self.P[own_in]
+        p_face[f_out]   = self.outlet_pressure
+        p_face[f_w]     = self.P[own_w]
+
+        np.add.at(b, self.owner,           -p_face * self.Sf[:, axis])
+        np.add.at(b, self.neighbor[f_int],  p_face[f_int] * self.Sf[f_int, axis])
+
+        # --- ASSEMBLE (unchanged) ---
         rows = np.concatenate(rows)
         cols = np.concatenate(cols)
         data = np.concatenate(data)
-        
-        A = coo_matrix((data, (rows, cols)), shape=(self.Nc, self.Nc))
-        A_csr = A.tocsr()
-        
-        # --- UNDER-RELAXATION ---
-        a_P_original = A_csr.diagonal().copy()
-        alpha_u = 0.2
-        
-        A_diag_relaxed = a_P_original / alpha_u
-        A_csr.setdiag(A_diag_relaxed)
-        
+
+        A      = coo_matrix((data, (rows, cols)), shape=(self.Nc, self.Nc))
+        A_csr  = A.tocsr()
+
+        # Under-relaxation (unchanged)
+        a_P_original    = A_csr.diagonal().copy()
+        alpha_u         = 0.2
+        A_csr.setdiag(a_P_original / alpha_u)
         if hasattr(self, 'U_old'):
             b += ((1 - alpha_u) / alpha_u) * a_P_original * self.U_old[:, axis]
-        
+
         return A_csr, b, a_P_original                                          
             
             
@@ -427,9 +392,15 @@ class Solver:
         return A_csr, b
     
     def GET_VAR_CORRECTED(self, A_p, b_p):
+        p_prime = spsolve(A_p, b_p)
 
-        p_prime = spsolve(A_p,b_p)
-        
+        # FIX: Enforce p' = 0 at pressure outlet cells.
+        # The pressure there is already fixed; the correction must be zero.
+        # Without this, grad(p') explodes near the outlet and drives velocities
+        # into the velocity clamp, creating the observed fixed-point stall.
+        outlet_owners = np.unique(self.owner[self.outlet_faces])
+        p_prime[outlet_owners] = 0.0
+
         return p_prime
     
     
