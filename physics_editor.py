@@ -25,12 +25,12 @@ class PhysicsEditor:
 
         # --- Boundary Layer Settings (in world units) ---
         self.n_layers = 4
-        self.growth_factor = 1.4
-        self.thickness = 4.0
-        self.boundary_spacing = 35.0
+        self.growth_factor = 1.1
+        self.thickness = 1.0
+        self.boundary_spacing = 6.0
 
         # --- Mesh Generation (in world units) ---
-        self.r = 20.0
+        self.r = 4.0
 
         # --- Boundary Conditions (SI) ---
         self.inlet_velocity = 1.0

@@ -199,7 +199,7 @@ class Solver:
             # 2. Rhie-Chow Correction
             # Use the average of the RELAXED a_P from the momentum solve
             a_P_f = 0.5 * (a_P_u[own] + a_P_u[nei] + a_P_v[own] + a_P_v[nei]) / 2.0
-            a_P_f = np.maximum(a_P_f, 0.1) # Start with 0.1 or 1.0; tune as needed
+            a_P_f = np.maximum(a_P_f, 1e-10) # Start with 0.1 or 1.0; tune as needed
             
             # Grad P interpolated to face
             gradP_f_interp = 0.5 * (grad_P[own] + grad_P[nei])
@@ -331,7 +331,7 @@ class Solver:
         
         # --- UNDER-RELAXATION ---
         a_P_original = A_csr.diagonal().copy()
-        alpha_u = 0.5
+        alpha_u = 0.2
         
         A_diag_relaxed = a_P_original / alpha_u
         A_csr.setdiag(A_diag_relaxed)
@@ -434,7 +434,7 @@ class Solver:
     
     
     def CORRECT_PRESSURE_AND_VELOCITY(self, p_prime, a_P_u, a_P_v, u_star, v_star):
-        alpha_p = 0.3
+        alpha_p = 0.1
         
         # 1. Update Cell Pressure
         self.P += alpha_p * p_prime
