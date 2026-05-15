@@ -88,46 +88,77 @@ class Mesher:
         print(message)
 
     def create_boundary_points(self, ordered_lines):
+
         all_points = []
+
         all_thicknesses = []
+
         all_bc_tags = []
 
+
         bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2}
+
         num_l = len(ordered_lines)
 
+
         for i in range(num_l):
+
             line = ordered_lines[i]
+
             next_line = ordered_lines[(i + 1) % num_l]
+
             prev_line = ordered_lines[(i - 1) % num_l]
 
+
             start = np.array([line.a.x, line.a.y])
+
             end = np.array([next_line.a.x, next_line.a.y])
 
+
             line_vec = end - start
+
             line_length = np.linalg.norm(line_vec)
+
             if line_length == 0:
+
                 continue
 
+
             n_points = max(1, int(np.floor(line_length / self.boundary_spacing)))
+
             segment_points = np.linspace(start, end, n_points, endpoint=False)
+
             all_points.append(segment_points)
 
+
             if line.boundary_type == "Wall":
+
                 seg_thick = np.ones((n_points, 1))
+
             else:
+
                 seg_thick = np.zeros((n_points, 1))
 
+
             if line.boundary_type != "Wall" and prev_line.boundary_type == "Wall":
+
                 seg_thick[0] = 1.0
+
             all_thicknesses.append(seg_thick)
 
+
             tag = bc_map.get(line.boundary_type, 0)
+
             seg_tags = np.full(n_points, tag)
+
             all_bc_tags.append(seg_tags)
 
+
         self.boundary_points = np.vstack(all_points)
+
         self.thickness_mask = np.vstack(all_thicknesses)
-        self.point_bc_mask = np.concatenate(all_bc_tags)
+
+        self.point_bc_mask = np.concatenate(all_bc_tags) 
 
     def check_points(self):
         polygon_path = Path(self.boundary_points)
@@ -252,19 +283,27 @@ class Mesher:
         area = np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
         return area  # area < 0 is CCW, area > 0 is CW
 
-    def draw(self, screen, camera):
+    def draw(self, screen, camera, vbos=None):
         imgui.new_frame()
 
-        if hasattr(self, "lines"):
-            for line in self.lines:
-                line.draw(screen, camera, color=(255, 255, 255), width=2)
-
-        if hasattr(self, 'boundary_elements'):
-            for quad in self.boundary_elements:
-                quad.draw(screen, camera)
-
-        if hasattr(self, "triangulation") and self.triangulation:
-            self.triangulation.draw(screen, camera)
+        # If we have generated the VBO dictionary, use the fast GPU path
+        if vbos:
+            if 'triangles' in vbos:
+                camera.draw_vbo(vbos['triangles'][0], vbos['triangles'][1], color=(0, 100, 255))
+            if 'quads' in vbos:
+                camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
+            if 'walls' in vbos:
+                camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
+        else:
+            # Fallback (Slow object loop) if VBOs aren't ready yet
+            if hasattr(self, "lines"):
+                for line in self.lines:
+                    line.draw(screen, camera, color=(255, 255, 255), width=2)
+            if hasattr(self, 'boundary_elements'):
+                for quad in self.boundary_elements:
+                    quad.draw(screen, camera)
+            if hasattr(self, "triangulation") and self.triangulation:
+                self.triangulation.draw(screen, camera)
 
         imgui.begin("Solver")
         if imgui.button("Proceed to Solving"):
@@ -273,7 +312,39 @@ class Mesher:
 
         imgui.render()
         self.renderer.render(imgui.get_draw_data())
+        
+    def get_render_data(self):
+        """Categorizes mesh elements into bundles for multi-colored wireframe rendering."""
+        # Bundle 1: Unstructured Interior (Triangles)
+        tri_coords = []
+        if hasattr(self, 'triangulation') and self.triangulation:
+            for t in self.triangulation.triangles:
+                # Store as 3 line segments (6 points) for wireframe
+                pts = [t.a, t.b, t.b, t.c, t.c, t.a]
+                for pt in pts:
+                    tri_coords.extend([pt.x, pt.y])
 
+        # Bundle 2: Boundary Layers (Quads)
+        quad_coords = []
+        if hasattr(self, 'boundary_elements'):
+            for q in self.boundary_elements:
+                p = q.points  # FIX: Access the .points list from the Quad class
+                # Store as 4 line segments (8 points)
+                pts = [p[0], p[1], p[1], p[2], p[2], p[3], p[3], p[0]]
+                for pt in pts:
+                    quad_coords.extend([pt.x, pt.y])
+
+        # Bundle 3: The original CAD wall lines
+        wall_coords = []
+        for line in self.lines:
+            wall_coords.extend([line.a.x, line.a.y, line.b.x, line.b.y])
+
+        return {
+            'triangles': (np.array(tri_coords, dtype=np.float32), len(tri_coords) // 2),
+            'quads': (np.array(quad_coords, dtype=np.float32), len(quad_coords) // 2),
+            'walls': (np.array(wall_coords, dtype=np.float32), len(wall_coords) // 2)
+        }
+    
     def create_boundary_layers(self, n_layers=1, scaling_factor=4):
         layers = [self.boundary_points]
         for _ in range(n_layers):
@@ -282,29 +353,69 @@ class Mesher:
             layers.append(new_layer)
         return layers
 
-    def boundary_layer(self, polygon_points, scaling_factor):
+    def boundary_layer(self, polygon_points, current_thickness_array):
+        """
+        polygon_points: Nx2 array of the current layer's points
+        current_thickness_array: Nx1 array containing the target thickness for each point
+        """
         n = len(polygon_points)
         new_points = np.zeros_like(polygon_points)
 
+        # 1. Calculate standard edge vectors and normals
         next_points = np.roll(polygon_points, -1, axis=0)
         edges = next_points - polygon_points
         edge_lengths = np.linalg.norm(edges, axis=1)[:, np.newaxis]
-        unit_edges = edges / edge_lengths
+        unit_edges = edges / np.where(edge_lengths > 1e-9, edge_lengths, 1.0)
 
+        # Determine edge normals based on polygon orientation
         if self.orientation > 0:
             edge_normals = np.column_stack([-unit_edges[:, 1], unit_edges[:, 0]])
         else:
             edge_normals = np.column_stack([unit_edges[:, 1], -unit_edges[:, 0]])
 
+        # 2. Compute standard vertex miter normals
         prev_edge_normals = np.roll(edge_normals, 1, axis=0)
         vertex_normals = prev_edge_normals + edge_normals
         v_norm = np.linalg.norm(vertex_normals, axis=1)[:, np.newaxis]
         vertex_normals = np.where(v_norm > 1e-9, vertex_normals / v_norm, edge_normals)
 
         cos_theta = np.sum(vertex_normals * edge_normals, axis=1)[:, np.newaxis]
-        miter_length = scaling_factor / np.maximum(cos_theta, 0.1)
+        miter_lengths = 1.0 / np.maximum(cos_theta, 0.1)
 
-        new_points = polygon_points + vertex_normals * miter_length
+        # 3. --- CONSTRAINED CORNER OVERRIDE ---
+        # Look at the point BC tags to find where Wall (0) meets Inlet/Outlet (1 or 2)
+        for i in range(n):
+            current_tag = self.point_bc_mask[i]
+            prev_tag = self.point_bc_mask[(i - 1) % n]
+            
+            # Case A: Moving from an Inlet/Outlet to a Wall
+            if prev_tag != 0 and current_tag == 0:
+                # Force the extrusion vector to point exactly along the previous edge (the Inlet)
+                inlet_vector = -unit_edges[(i - 1) % n]  # Pointing into the domain along the inlet
+                vertex_normals[i] = inlet_vector
+                
+                # Adjust length so the normal thickness relative to the wall remains correct
+                # For a 90-degree corner, dot product is 1.0, so length multiplier is 1.0
+                wall_normal = edge_normals[i]
+                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                miter_lengths[i] = 1.0 / max(projection, 0.1)
+
+            # Case B: Moving from a Wall to an Inlet/Outlet
+            elif prev_tag == 0 and current_tag != 0:
+                # Force the extrusion vector to point exactly along the current edge (the Inlet)
+                inlet_vector = unit_edges[i] 
+                vertex_normals[i] = inlet_vector
+                
+                wall_normal = edge_normals[(i - 1) % n]
+                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                miter_lengths[i] = 1.0 / max(projection, 0.1)
+                
+                # Ensure this point actually moves (it belongs to the inlet patch now, 
+                # but it must stretch to accommodate the neighboring wall's thickness)
+                current_thickness_array[i] = current_thickness_array[(i - 1) % n]
+
+        # 4. Generate the new layer points
+        new_points = polygon_points + vertex_normals * (miter_lengths * current_thickness_array)
         return new_points
 
     def connect_layers(self, layers):

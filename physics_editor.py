@@ -9,7 +9,7 @@ _UNIT_FACTORS = {"mm": 0.001, "cm": 0.01, "m": 1.0}
 
 class PhysicsEditor:
 
-    def __init__(self, screen, lines, renderer):
+    def __init__(self, screen, lines, renderer, initial_unit_idx=2):
         self.lines = lines
         self.renderer = renderer
         self.finished = False
@@ -20,8 +20,8 @@ class PhysicsEditor:
 
         # --- Unit System ---
         self._unit_names = ["mm", "cm", "m"]
-        self._unit_idx = 0
-        self.unit_to_meters = 0.001
+        self._unit_idx = initial_unit_idx 
+        self.unit_to_meters = _UNIT_FACTORS[self._unit_names[self._unit_idx]]
 
         # --- Boundary Layer Settings (in world units) ---
         self.n_layers = 4
@@ -64,7 +64,7 @@ class PhysicsEditor:
         hovered_line = None
         if not want_mouse:
             for line in self.lines:
-                if line.is_mouse_over(mouse_world):
+                if line.is_mouse_over(mouse_world,camera):
                     hovered_line = line
                     break
 
@@ -105,9 +105,9 @@ class PhysicsEditor:
         opened, _ = imgui.collapsing_header("Boundary layer settings")
         if opened:
             _, self.n_layers         = imgui.input_int(  "N. Boundary layers",           self.n_layers,         step=1,   step_fast=1)
-            _, self.growth_factor    = imgui.input_float("Growth factor",                 self.growth_factor,    step=0.1, step_fast=1.0)
-            _, self.thickness        = imgui.input_float(f"First layer thickness [{u}]",  self.thickness,        step=0.5, step_fast=5.0)
-            _, self.boundary_spacing = imgui.input_float(f"Boundary cell spacing [{u}]",  self.boundary_spacing, step=1.0, step_fast=10.0)
+            _, self.growth_factor    = imgui.input_float("Growth factor",                 self.growth_factor,    step=0.05, step_fast=1.0)
+            _, self.thickness        = imgui.input_float(f"First layer thickness [{u}]",  self.thickness,        step=0.25, step_fast=5.0)
+            _, self.boundary_spacing = imgui.input_float(f"Boundary cell spacing [{u}]",  self.boundary_spacing, step=0.5, step_fast=10.0)
 
         opened2, _ = imgui.collapsing_header("Mesher settings")
         if opened2:
@@ -158,10 +158,10 @@ class PhysicsEditor:
         self.renderer.render(imgui.get_draw_data())
 
     # ------------------------------------------------------------------
-    def handle_selection(self, pos):
+    def handle_selection(self, pos,camera):
         """Called on left-click (world coords). Clicking same line deselects it."""
         for line in self.lines:
-            if line.is_mouse_over(pos):
+            if line.is_mouse_over(pos,camera):
                 if line is self.selected_line:
                     self.selected_line = None  # toggle off
                 else:

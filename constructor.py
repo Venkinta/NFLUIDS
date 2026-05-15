@@ -1,7 +1,6 @@
 from triangulation import Triangulation
 from triangle import Triangle
 from point import Point
-import inspect
 import numpy as np 
 
 def create_super_triangle(points):
@@ -17,8 +16,6 @@ def create_super_triangle(points):
     mid_x = (min_x + max_x) / 2
     mid_y = (min_y + max_y) / 2
 
-    # Scale factor 20 ensures the super-triangle doesn't cause precision issues
-    # near the edges of your actual data.
     p1 = Point(mid_x - 20 * dmax, mid_y - dmax)
     p2 = Point(mid_x + 20 * dmax, mid_y - dmax)
     p3 = Point(mid_x, mid_y + 20 * dmax)
@@ -27,21 +24,45 @@ def create_super_triangle(points):
 
 def checkCircumcentre(triangle, point):
     """Standard determinant-based circumcircle check."""
-    # Ensure CCW orientation for consistent results
     orientCCW(triangle)
     
-    # Coordinates relative to the test point
     ax, ay = triangle.a.x - point.x, triangle.a.y - point.y
     bx, by = triangle.b.x - point.x, triangle.b.y - point.y
     cx, cy = triangle.c.x - point.x, triangle.c.y - point.y
 
-    # Determinant of the 3x3 matrix (incircle test)
     det = (
         (ax*ax + ay*ay) * (bx*cy - cx*by) -
         (bx*bx + by*by) * (ax*cy - cx*ay) +
         (cx*cx + cy*cy) * (ax*by - bx*ay)
     )
     return det > 0   
+
+def check_circum_bulk(coords_list, point):
+    """Checks all triangles against one point using pure vectorization."""
+    if not coords_list:
+        return np.array([])
+        
+    # Instant array creation from flat tuples
+    C = np.array(coords_list)
+    px, py = point.x, point.y
+
+    # Vectorized extraction and subtraction
+    Ax = C[:, 0] - px
+    Ay = C[:, 1] - py
+    Bx = C[:, 2] - px
+    By = C[:, 3] - py
+    Cx = C[:, 4] - px
+    Cy = C[:, 5] - py
+
+    a2 = Ax**2 + Ay**2
+    b2 = Bx**2 + By**2
+    c2 = Cx**2 + Cy**2
+    
+    det = (a2 * (Bx*Cy - Cx*By) -
+           b2 * (Ax*Cy - Cx*Ay) +
+           c2 * (Ax*By - Bx*Ay))
+    
+    return det > 0
 
 def orientCCW(triangle):
     a = triangle.a
@@ -51,21 +72,13 @@ def orientCCW(triangle):
     cross = (b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x)
 
     if cross < 0:
-        # swap to make it CCW
         triangle.b, triangle.c = triangle.c, triangle.b
 
-        
-
- 
 def updatebadedges(edge_count, triangle):
     for edge in triangle.edges():
         edge_count[edge] = edge_count.get(edge, 0) + 1
 
-
-    
-
 #functions meant for mesher.py
-
 def cross2d(u, v):
     return u[0]*v[1] - u[1]*v[0]
 
@@ -77,7 +90,7 @@ def intersect(line1, line2):
 
     rxs = cross2d(r, s)
     if abs(rxs) < 1e-9:
-        return None  # parallel or collinear
+        return None  
 
     t = cross2d(q - p, s) / rxs
     return p + t * r
