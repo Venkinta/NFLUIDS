@@ -10,6 +10,7 @@ from quad import Quad
 from shapely.geometry import Polygon as ShapelyPoly
 from shapely.geometry import Point as ShapelyPoint
 from triangle import Triangle
+import time
 
 import cProfile
 import pstats
@@ -51,41 +52,73 @@ class Mesher:
         self.finished = False
 
     def mesh(self):
+        t_total = time.perf_counter()
+        print("\n" + "="*50)
+        print("  MESHER  —  starting pipeline")
+        print("="*50)
+
         # 1. Get the lines in the correct loop order
+        t = time.perf_counter()
         ordered_lines = self.build_polygon()
+        print(f"[1/7] Polygon ordering      {time.perf_counter()-t:6.3f}s  ({len(ordered_lines)} edges)")
 
         # 2. Calculate orientation
+        t = time.perf_counter()
         vert_coords = [(line.a.x, line.a.y) for line in ordered_lines]
         vert_array = np.array(vert_coords)
         self.orientation = self.polygon_orientation(vert_array)
+        winding = "CW" if self.orientation > 0 else "CCW"
+        print(f"[2/7] Orientation           {time.perf_counter()-t:6.3f}s  ({winding})")
 
         # 3. Create high-res boundary points
+        t = time.perf_counter()
         self.create_boundary_points(ordered_lines)
+        print(f"[3/7] Boundary points       {time.perf_counter()-t:6.3f}s  ({len(self.boundary_points)} pts)")
 
         # 4. Generate Layers
+        t = time.perf_counter()
         layers = [self.boundary_points]
         for i in range(self.n_layers):
             current_factor_array = self.thickness_mask * self.thickness
             next_layer = self.boundary_layer(layers[-1], current_factor_array)
             layers.append(next_layer)
             self.thickness *= self.growth_factor
+        print(f"[4/7] Boundary layers       {time.perf_counter()-t:6.3f}s  ({self.n_layers} layers)")
 
         # 5. Connect them into Quads
+        t = time.perf_counter()
         self.boundary_elements = self.connect_layers(layers)
+        print(f"[5/7] Layer connectivity    {time.perf_counter()-t:6.3f}s  ({len(self.boundary_elements)} quad/tri elements)")
 
-        # --- PHASE 2: Unstructured Interior ---
+        # 6. Steiner points for interior
+        t = time.perf_counter()
         inner_ring = layers[-1]
         self.create_steiner_points(inner_ring, self.r)
+        n_steiner = len(self.points) if self.points is not None and len(self.points) > 0 else 0
+        print(f"[6/7] Steiner points        {time.perf_counter()-t:6.3f}s  ({n_steiner} interior pts)")
 
+        # 7. Bowyer-Watson triangulation + filter
+        t = time.perf_counter()
         inner_ring_pts = [Point(p[0], p[1]) for p in inner_ring]
-        steiner_pts = [Point(p[0], p[1]) for p in self.points]
+        steiner_pts    = [Point(p[0], p[1]) for p in self.points]
         all_interior_pts = inner_ring_pts + steiner_pts
+        n_input = len(all_interior_pts)
+        print(f"[7/7] Triangulating {n_input} points …")
 
         self.triangulation = Bowyer_watson(all_interior_pts)
-        self.filter_triangles(inner_ring)
+        n_raw = len(self.triangulation.triangles)
 
-        message = 'generated ' + repr(len(self.triangulation.triangles)) + ' cells'
-        print(message)
+        self.filter_triangles(inner_ring)
+        n_final = len(self.triangulation.triangles)
+        elapsed = time.perf_counter() - t
+        print(f"      Bowyer-Watson done     {elapsed:6.3f}s  "
+              f"({n_raw} raw → {n_final} kept after filter)")
+
+        print("-"*50)
+        print(f"  Total meshing time: {time.perf_counter()-t_total:.3f}s")
+        print(f"  Generated {n_final} interior cells  +  {len(self.boundary_elements)} boundary cells")
+        print(f"  Grand total: {n_final + len(self.boundary_elements)} cells")
+        print("="*50 + "\n")
 
     def create_boundary_points(self, ordered_lines):
 
@@ -223,11 +256,13 @@ class Mesher:
 
                 gx, gy = get_grid_coords(candidate)
                 is_far_enough = True
+                r_sq = r * r
                 for i in range(max(0, gx - 2), min(cols, gx + 3)):
                     for j in range(max(0, gy - 2), min(rows, gy + 3)):
                         neighbor = grid[i, j]
                         if neighbor is not None:
-                            if np.linalg.norm(candidate - neighbor) < r:
+                            diff = candidate - neighbor
+                            if diff[0]*diff[0] + diff[1]*diff[1] < r_sq:
                                 is_far_enough = False
                                 break
                     if not is_far_enough:
@@ -483,9 +518,12 @@ class Mesher:
         ALL coordinates and distances are converted to SI metres by multiplying
         with self.unit_to_meters.  Areas are multiplied by unit_to_meters².
         """
-        print('Beginning data collection for Solver...')
-        s  = self.unit_to_meters      # length scale factor
-        s2 = s * s                    # area scale factor
+        t_pipe = time.perf_counter()
+        print("\n" + "="*50)
+        print("  DATA PIPELINE  —  mesh → solver handoff")
+        print("="*50)
+        s  = self.unit_to_meters
+        s2 = s * s
 
         def get_edge_key(p_a, p_b):
             ax = p_a.x if hasattr(p_a, 'x') else p_a[0]
@@ -504,16 +542,23 @@ class Mesher:
             edge_key = get_edge_key(p1, p2)
             bc_lookup[edge_key] = self.point_bc_mask[i]
 
+        bp = self.boundary_points
+        b_mids = (bp + np.roll(bp, -1, axis=0)) / 2.0   # precomputed once
+
         # 2. Gather all cells
+        t = time.perf_counter()
         valid_boundary_elements = [c for c in self.boundary_elements if float(c.area) > 1e-8]
         Cells = valid_boundary_elements + self.triangulation.triangles
         Nc = len(Cells)
+        print(f"[1/4] Cell gather           {time.perf_counter()-t:6.3f}s  ({Nc} cells: "
+              f"{len(valid_boundary_elements)} boundary + {len(self.triangulation.triangles)} interior)")
 
         # Cell centers and areas (world units → converted to SI below)
         cell_centers_wu = np.array([[c.centroid.x, c.centroid.y] for c in Cells], dtype=np.float64)
         cell_areas_wu   = np.array([float(c.area) for c in Cells], dtype=np.float64)
 
         # 3. Build Edge Map
+        t = time.perf_counter()
         edge_map = {}
         for cell_id, cell in enumerate(Cells):
             for edge in cell.edges():
@@ -524,8 +569,14 @@ class Mesher:
                 if key not in edge_map:
                     edge_map[key] = []
                 edge_map[key].append(cell_id)
+        Nf = len(edge_map)
+        n_internal = sum(1 for ids in edge_map.values() if len(ids) > 1)
+        n_boundary = Nf - n_internal
+        print(f"[2/4] Edge map              {time.perf_counter()-t:6.3f}s  ({Nf} faces: "
+              f"{n_internal} internal, {n_boundary} boundary)")
 
         # 4. Populate Face Arrays (still in world units at this point)
+        t = time.perf_counter()
         Nf = len(edge_map)
         owner    = np.zeros(Nf, dtype=np.int32)
         neighbor = np.full(Nf, -1, dtype=np.int32)
@@ -550,16 +601,11 @@ class Mesher:
                 p1_raw, p2_raw = edge_key
                 face_mid = (np.array(p1_raw) + np.array(p2_raw)) / 2.0
 
-                assigned_tag = 0
-                min_dist = float('inf')
-                for i in range(len(self.boundary_points)):
-                    b1 = self.boundary_points[i]
-                    b2 = self.boundary_points[(i + 1) % len(self.boundary_points)]
-                    b_mid = (b1 + b2) / 2.0
-                    dist = np.linalg.norm(face_mid - b_mid)
-                    if dist < min_dist:
-                        min_dist = dist
-                        assigned_tag = self.point_bc_mask[i]
+                diffs    = b_mids - face_mid
+                sq_dist  = diffs[:, 0]**2 + diffs[:, 1]**2
+                min_idx  = int(np.argmin(sq_dist))
+                min_dist = np.sqrt(sq_dist[min_idx])
+                assigned_tag = self.point_bc_mask[min_idx]
 
                 # Tolerance stays in world units (e.g. 1 mm) — no conversion needed here
                 if min_dist < 1.0:
@@ -590,10 +636,17 @@ class Mesher:
             df_wu[face_idx]    = df_vec
             magDf_wu[face_idx] = np.linalg.norm(df_vec)
 
+        print(f"[3/4] Face arrays           {time.perf_counter()-t:6.3f}s  (BC tags: "
+              f"wall={np.sum(boundary_tags==0)}, "
+              f"inlet={np.sum(boundary_tags==1)}, "
+              f"outlet={np.sum(boundary_tags==2)}, "
+              f"internal={np.sum(boundary_tags==-1)})")
+
         # ----------------------------------------------------------------
         # 5. UNIT CONVERSION  — world units → SI metres
         #    Lengths × s,  Areas × s²,  Normals (Sf) are edge-length vectors × s
         # ----------------------------------------------------------------
+        t = time.perf_counter()
         cell_centers_si = cell_centers_wu * s
         cell_areas_si   = cell_areas_wu   * s2
         Sf_si           = Sf_wu   * s
@@ -601,16 +654,21 @@ class Mesher:
         df_si           = df_wu   * s
         magDf_si        = magDf_wu * s
         magSf_si        = np.linalg.norm(Sf_si, axis=1)
-
-        print(f"Unit conversion applied: ×{s} (lengths), ×{s2:.2e} (areas)")
-        print(f"  cell_centers range: [{cell_centers_si.min():.4f}, {cell_centers_si.max():.4f}] m")
-        print(f"  cell_areas  range:  [{cell_areas_si.min():.4e}, {cell_areas_si.max():.4e}] m²")
+        print(f"[4/4] Unit conversion (×{s}) {time.perf_counter()-t:6.3f}s")
+        print(f"      cell_areas:  [{cell_areas_si.min():.3e}, {cell_areas_si.max():.3e}] m²")
+        print(f"      cell_centers:[{cell_centers_si.min():.4f},  {cell_centers_si.max():.4f}] m")
 
         cells_in_faces = set(owner) | set(neighbor[neighbor != -1])
         all_cells      = set(range(Nc))
         orphan_cells   = all_cells - cells_in_faces
         if orphan_cells:
             print(f"⚠️  MESHER BUG: {len(orphan_cells)} cells have NO faces!")
+        else:
+            print(f"      Connectivity OK — no orphan cells")
+
+        print("-"*50)
+        print(f"  Pipeline total: {time.perf_counter()-t_pipe:.3f}s  →  solver ready")
+        print("="*50 + "\n")
 
         return {
             'Nc':           Nc,

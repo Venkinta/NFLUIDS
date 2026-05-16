@@ -10,6 +10,9 @@ from solver import Solver
 from quad import Quad
 from camera import Camera
 from physics_editor import PhysicsEditor
+import OpenGL
+OpenGL.ERROR_CHECKING = False   # eliminates ~10M glCheckError calls per session
+OpenGL.ERROR_ON_COPY = False
 from OpenGL.GL import *
 import imgui
 from imgui.integrations.pygame import PygameRenderer

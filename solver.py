@@ -143,10 +143,8 @@ class Solver:
             
             max_residual = max(norm_cont, norm_u, norm_v)
 
-            self.health_check(iteration,a_P_u)
-
-
             if iteration % 10 == 0:
+                self.health_check(iteration, a_P_u)
                 print(f"Iteration {iteration}: "
                     f"Cont = {norm_cont:.2e}, "
                     f"U = {norm_u:.2e}, "

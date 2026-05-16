@@ -40,6 +40,9 @@ class PhysicsEditor:
         self.selected_line = None
         self.boundary_types = ["Wall", "Velocity Inlet", "Pressure Outlet"]
         self.current_line_idx = 0
+        
+        # --- Re calculator part ---
+        self.char_length = 1.0 # Default to 1m, 1mm, etc.
 
     # ------------------------------------------------------------------
     def _line_length(self, line):
@@ -97,8 +100,38 @@ class PhysicsEditor:
 
         imgui.separator()
 
-        _, self.density   = imgui.input_float("Density [kg/m3]",  self.density,   step=0.1,   step_fast=1.0)
-        _, self.viscosity = imgui.input_float("Viscosity [Pa*s]",  self.viscosity, step=0.001, step_fast=0.01)
+        imgui.text("Fluid Properties")
+        _, self.density = imgui.input_float("Density [kg/m3]", self.density, step=0.1, format="%.3f")
+        _, self.viscosity = imgui.input_float("Viscosity [Pa*s]", self.viscosity, format="%.3e")
+
+        # --- New Validation Section ---
+        imgui.separator()
+        imgui.text("Validation Checks")
+
+        # Let the user define the characteristic length (L)
+        _, self.char_length = imgui.input_float(f"Char. Length [{u}]", self.char_length, step=0.1)
+
+        # Calculate Reynolds: Re = (rho * V * L) / mu
+        # Note: we multiply char_length by unit_to_meters to keep the math in SI
+        world_L = self.char_length * self.unit_to_meters
+        reynolds = (self.density * self.inlet_velocity * world_L) / max(self.viscosity, 1e-12)
+
+        imgui.text(f"Reynolds Number: {reynolds:.2e}")
+
+        # DNS Estimator (3D Scaling: N ~ Re^2.25)
+        if reynolds > 0:
+            dns_cells = math.pow(reynolds, 2.25)
+            
+            # Visual warning if the number is getting absurd
+            if dns_cells > 1e8:
+                imgui.text_colored("Est. DNS Cells: >100M (Heavy!)", 1.0, 0.4, 0.4)
+            else:
+                imgui.text(f"Est. DNS Cells: {dns_cells:.2e}")
+
+            # Tooltip explaining the scaling
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Estimated number of cells required for DNS based on \n"
+                                "the Kolmogorov scale resolution: N ≈ Re^(9/4)")
 
         imgui.separator()
 

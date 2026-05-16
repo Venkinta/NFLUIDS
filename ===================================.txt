@@ -1,0 +1,112 @@
+==================================================
+  MESHER  —  starting pipeline
+==================================================
+[1/7] Polygon ordering       0.000s  (6 edges)
+[2/7] Orientation            0.000s  (CCW)
+[3/7] Boundary points        0.000s  (330 pts)
+[4/7] Boundary layers        0.001s  (6 layers)
+[5/7] Layer connectivity     0.059s  (1848 quad/tri elements)
+[6/7] Steiner points         2.569s  (4822 interior pts)
+[7/7] Triangulating 5152 points …
+      Bowyer-Watson done     18.867s  (10193 raw → 9969 kept after filter)
+--------------------------------------------------
+  Total meshing time: 21.498s
+  Generated 9969 interior cells  +  1848 boundary cells
+  Grand total: 11817 cells
+==================================================
+
+         21677897 function calls (21677735 primitive calls) in 428.056 seconds
+
+   Ordered by: internal time
+   List reduced from 669 to 20 due to restriction <20>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    22334  350.456    0.016  350.456    0.016 {method 'tick' of 'pygame.time.Clock' objects}
+     3000   24.461    0.008   24.461    0.008 {built-in method scipy.sparse.linalg._dsolve._superlu.gssv}
+   135526   14.038    0.000   14.038    0.000 {built-in method numpy.asarray}
+    58705    4.143    0.000    4.143    0.000 {method 'index' of 'list' objects}
+     7604    3.708    0.000    3.708    0.000 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\bowyerwatson.py:21(<listcomp>)
+        2    2.936    1.468    3.772    1.886 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\mesher.py:201(create_steiner_points)
+    22334    2.325    0.000    2.325    0.000 {built-in method pygame.event.get}
+    22333    1.805    0.000    9.211    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\imgui\integrations\opengl.py:260(render)
+    22334    1.075    0.000    1.075    0.000 {built-in method pygame.display.flip}
+     1001    0.991    0.001    1.534    0.002 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:185(SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION)
+  2196155    0.935    0.000    0.991    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\OpenGL\error.py:208(glCheckError)
+   178674    0.772    0.000    3.900    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\OpenGL\wrapper.py:758(wrapperCall)
+    16818    0.708    0.000   11.965    0.001 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\physics_editor.py:55(draw)
+        1    0.676    0.676  428.114  428.114 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\main.py:24(run_app)
+    56061    0.672    0.000    1.128    0.000 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\line.py:27(is_mouse_over)
+   107452    0.654    0.000    1.596    0.000 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\camera.py:47(draw_screen_line)
+    57006    0.602    0.000    0.906    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\OpenGL\wrapper.py:965(wrapperCall)
+     1000    0.551    0.001    1.296    0.001 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:321(ASSEMBLE_PRESSURE_CORRECTION)
+  1297747    0.546    0.000    0.971    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\OpenGL\wrapper.py:506(calculate_pyArgs)
+   654111    0.492    0.000    0.492    0.000 {built-in method numpy.array}
+
+
+==================================================
+  MESHER  —  starting pipeline
+==================================================
+[1/7] Polygon ordering       0.000s  (4 edges)
+[2/7] Orientation            0.000s  (CCW)
+[3/7] Boundary points        0.000s  (198 pts)
+[4/7] Boundary layers        0.001s  (4 layers)
+[5/7] Layer connectivity     0.006s  (664 quad/tri elements)
+[6/7] Steiner points        14.442s  (27917 interior pts)
+[7/7] Triangulating 28115 points …
+      Bowyer-Watson done     661.488s  (56030 raw → 56030 kept after filter)
+--------------------------------------------------
+  Total meshing time: 675.938s
+  Generated 56030 interior cells  +  664 boundary cells
+  Grand total: 56694 cells
+==================================================
+==================================================
+  DATA PIPELINE  —  mesh → solver handoff
+==================================================
+[1/4] Cell gather            0.002s  (56694 cells: 664 boundary + 56030 interior)
+[2/4] Edge map               1.086s  (85480 faces: 85266 internal, 214 boundary)
+DEBUG: bc_lookup contains 198 total boundary edges.
+DEBUG: Unique tags found in lookup: {np.int64(0), np.int64(1), np.int64(2)}
+DEBUG: edge_map has 214 boundary candidates.
+[3/4] Face arrays            0.987s  (BC tags: wall=178, inlet=18, outlet=18, internal=85266)
+[4/4] Unit conversion (×0.001)  0.003s
+      cell_areas:  [1.859e-07, 8.018e-06] m²
+      cell_centers:[0.0393,  0.5387] m
+      Connectivity OK — no orphan cells
+--------------------------------------------------
+  Pipeline total: 2.267s  →  solver ready
+==================================================
+
+--- MESH SANITY CHECK ---
+Total Cells: 56694
+Internal Faces: 85266
+Inlet Faces: 18
+Outlet Faces: 18
+Wall Faces: 178
+-------------------------
+
+         33180348 function calls (33180189 primitive calls) in 1300.630 seconds
+
+   Ordered by: internal time
+   List reduced from 669 to 20 due to restriction <20>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     3000  385.500    0.129  385.500    0.129 {built-in method scipy.sparse.linalg._dsolve._superlu.gssv}
+   193677  384.575    0.002  384.575    0.002 {built-in method numpy.asarray}
+   247434  179.431    0.001  179.431    0.001 {method 'index' of 'list' objects}
+    11062  172.148    0.016  172.148    0.016 {method 'tick' of 'pygame.time.Clock' objects}
+    28115   87.848    0.003   87.848    0.003 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\bowyerwatson.py:21(<listcomp>)
+     1001   11.791    0.012   15.890    0.016 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:185(SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION)
+        1   11.740   11.740   14.441   14.441 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\mesher.py:201(create_steiner_points)
+     2000    6.880    0.003   16.320    0.008 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:232(assemble_momentum)
+     1000    6.247    0.006   11.110    0.011 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:321(ASSEMBLE_PRESSURE_CORRECTION)
+     3000    4.053    0.001    4.053    0.001 {built-in method scipy.sparse._sparsetools.csr_sort_indices}
+     2101    3.778    0.002    5.759    0.003 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:424(calculate_pressure_gradients)
+     3000    3.753    0.001    3.753    0.001 {built-in method scipy.sparse._sparsetools.coo_tocsr}
+        1    3.514    3.514  661.212  661.212 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\bowyerwatson.py:7(Bowyer_watson)
+        1    3.375    3.375  438.293  438.293 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\solver.py:74(Solve)
+    70388    3.138    0.000    3.138    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+    20606    2.728    0.000    2.728    0.000 {method 'at' of 'numpy.ufunc' objects}
+    11062    2.344    0.000    2.344    0.000 {built-in method pygame.event.get}
+    28115    2.097    0.000    2.179    0.000 C:\Users\nesti\Documents\PYTHON_LEARNING\TextEditor\constructor.py:24(_check_circum_bulk_core)
+     3000    0.920    0.000    0.920    0.000 {built-in method scipy.sparse._sparsetools.csr_sum_duplicates}
+    11061    0.911    0.000    4.557    0.000 C:\Users\nesti\AppData\Local\Programs\Python\Python311\Lib\site-packages\imgui\integrations\opengl.py:260(render)
