@@ -9,7 +9,7 @@ _UNIT_FACTORS = {"mm": 0.001, "cm": 0.01, "m": 1.0}
 
 class PhysicsEditor:
 
-    def __init__(self, screen, lines, renderer, initial_unit_idx=2):
+    def __init__(self, screen, lines, renderer, initial_unit_idx=0):
         self.lines = lines
         self.renderer = renderer
         self.finished = False

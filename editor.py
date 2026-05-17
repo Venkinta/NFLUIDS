@@ -25,7 +25,7 @@ class Editor:
         
         # --- NEW UNIT STATE (Solves Problem 3) ---
         self.unit_names = ["mm", "cm", "m"]
-        self.unit_idx = 2 # Default to meters so 10 = 10m
+        self.unit_idx = 0 # Default to meters so 10 = 10m
         
         self.snap_step = 1.0 # Set to 0.0 to disable, 1.0 for whole numbers
         self.show_tracking_lines = True
@@ -173,13 +173,15 @@ class Editor:
             tooltip_x = self.current_mouse_pos[0] + 15
             tooltip_y = self.current_mouse_pos[1] + 15
             
+            current_unit = self.unit_names[self.unit_idx] # Grab "mm", "cm", or "m"
+            
             imgui.set_next_window_position(tooltip_x, tooltip_y, imgui.ALWAYS)
             imgui.begin("CursorInfo", flags=imgui.WINDOW_NO_TITLE_BAR | 
                                             imgui.WINDOW_ALWAYS_AUTO_RESIZE | 
                                             imgui.WINDOW_NO_MOVE | 
                                             imgui.WINDOW_NO_INPUTS)
             
-            imgui.text(f"Length: {length:.4f} m")
+            imgui.text(f"Length: {length:.4f} {current_unit}")
             imgui.text(f"dx: {dx:.4f} | dy: {dy:.4f}")
             imgui.text(f"Pos: ({target_world_pos.x:.2f}, {target_world_pos.y:.2f})")
             imgui.end()

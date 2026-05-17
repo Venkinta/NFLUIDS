@@ -97,14 +97,15 @@ def checkCircumcentre(triangle, point):
 def check_circum_bulk(coords_list, point):
     """Checks all triangles against one point using the parallel JIT kernel.
 
-    coords_list : list/array of (ax,ay,bx,by,cx,cy) tuples — one per triangle
+    coords_list : list/array of (ax,ay,bx,by,cx,cy) — or a (N,6) numpy view
+                  from Triangulation.coords.
     point       : Point with .x and .y attributes
-    Returns a bool NumPy array of length len(coords_list).
+    Returns a bool NumPy array of length N.
     """
-    if not coords_list:
+    if not len(coords_list):          # works for both list and ndarray
         return np.array([], dtype=bool)
-    # np.asarray avoids a copy when coords_list is already an ndarray;
-    # forces float64 so the JIT kernel always gets the right dtype.
+    # np.asarray is a no-op when coords_list is already a float64 ndarray
+    # (the Triangulation.coords view), so this costs nothing in the hot path.
     C = np.asarray(coords_list, dtype=np.float64)
     return _check_circum_bulk_core(C, float(point.x), float(point.y))
 

@@ -11,7 +11,14 @@ class Point:
         return self.x == other.x and self.y == other.y
 
     def __hash__(self):
-        return hash((self.x, self.y))
+        # Points are effectively immutable after creation in this codebase.
+        # Cache the hash so repeated frozenset/dict lookups (edge_count in
+        # Bowyer-Watson, edge_map in solver_data_pipeline) pay no tuple cost.
+        try:
+            return self._hash
+        except AttributeError:
+            self._hash = hash((self.x, self.y))
+            return self._hash
 
     def __repr__(self):
         return f"P({self.x:.3f}, {self.y:.3f})"

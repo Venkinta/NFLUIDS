@@ -14,11 +14,13 @@ def Bowyer_watson(input_points):
     triangulation.add_triangle(super_triangle)
 
     for point in points:
-        # 2. Safely check all existing triangles using fast C-speed NumPy math
-        # We now pass triangulation.coords instead of triangulation.triangles
-        if triangulation.coords: 
+        if triangulation.triangles:
             mask = ct.check_circum_bulk(triangulation.coords, point)
-            badTriangles = [triangulation.triangles[i] for i, is_bad in enumerate(mask) if is_bad]
+            # np.nonzero runs at C speed — extracts bad indices without any
+            # Python loop over all N triangles. We then only iterate the small
+            # number of bad ones (typically 3-10), not the full triangulation.
+            bad_indices = np.nonzero(mask)[0]
+            badTriangles = [triangulation.triangles[i] for i in bad_indices]
         else:
             badTriangles = []
 
@@ -45,12 +47,12 @@ def Bowyer_watson(input_points):
             ct.orientCCW(newTriangle) 
             triangulation.add_triangle(newTriangle)
 
-    # Cleanup: Remove triangles connected to the super-triangle vertices
+    # Cleanup: Remove triangles sharing a vertex with the super-triangle.
+    # Must use remove_triangle() to keep _tri_to_idx and _coords_np in sync.
     super_verts = set(super_triangle.vertices())
-    
-    triangulation.triangles = [
-        t for t in triangulation.triangles 
-        if not any(v in super_verts for v in t.vertices())
-    ]
+    to_remove = [t for t in triangulation.triangles
+                 if any(v in super_verts for v in t.vertices())]
+    for t in to_remove:
+        triangulation.remove_triangle(t)
 
     return triangulation

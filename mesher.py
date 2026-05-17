@@ -219,9 +219,12 @@ class Mesher:
         points = []
         active = []
 
+        # Inline constants so the hot loop avoids repeated attribute lookups
+        _w_inv = 1.0 / w
+
         def get_grid_coords(p):
-            gx = int((p[0] - xmin) / w)
-            gy = int((p[1] - ymin) / w)
+            gx = int((p[0] - xmin) * _w_inv)
+            gy = int((p[1] - ymin) * _w_inv)
             return gx, gy
 
         found_start = False
@@ -257,8 +260,13 @@ class Mesher:
                 gx, gy = get_grid_coords(candidate)
                 is_far_enough = True
                 r_sq = r * r
-                for i in range(max(0, gx - 2), min(cols, gx + 3)):
-                    for j in range(max(0, gy - 2), min(rows, gy + 3)):
+                # Ternary clamps avoid 4 Python builtin calls per candidate
+                i0 = gx - 2 if gx > 2 else 0
+                i1 = gx + 3 if gx + 3 < cols else cols
+                j0 = gy - 2 if gy > 2 else 0
+                j1 = gy + 3 if gy + 3 < rows else rows
+                for i in range(i0, i1):
+                    for j in range(j0, j1):
                         neighbor = grid[i, j]
                         if neighbor is not None:
                             diff = candidate - neighbor
@@ -267,6 +275,7 @@ class Mesher:
                                 break
                     if not is_far_enough:
                         break
+
 
                 if not is_far_enough:
                     continue
@@ -501,15 +510,16 @@ class Mesher:
 
     def filter_triangles(self, inner_ring_points):
         ring_path = Path(inner_ring_points)
-        centroids_coords = [[t.centroid.x, t.centroid.y] for t in self.triangulation.triangles]
-        centroids = np.array(centroids_coords, dtype=np.float64)
+        # Snapshot the list before any removal (swap-with-last changes order)
+        current_tris = list(self.triangulation.triangles)
+        centroids = np.array([[t.centroid.x, t.centroid.y] for t in current_tris],
+                             dtype=np.float64)
         mask = ring_path.contains_points(centroids, radius=-1e-5)
 
-        valid_triangles = []
-        for is_inside, triangle in zip(mask, self.triangulation.triangles):
-            if is_inside:
-                valid_triangles.append(triangle)
-        self.triangulation.triangles = valid_triangles
+        # Collect first, then remove — safe against swap-with-last reordering
+        to_remove = [t for t, keep in zip(current_tris, mask) if not keep]
+        for t in to_remove:
+            self.triangulation.remove_triangle(t)
 
     # ------------------------------------------------------------------
     def solver_data_pipeline(self):
