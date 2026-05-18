@@ -1,4 +1,3 @@
-import pygame
 import math
 from line import Line
 from editor import Editor
@@ -20,6 +19,8 @@ from visualizer import Visualizer
 
 import cProfile
 import pstats
+
+
 
 def run_app():
     pygame.init()
