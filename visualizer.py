@@ -5,14 +5,19 @@ import numpy as np
 from scipy.spatial import cKDTree # Efficient spatial searching
 
 class Visualizer:
-    def __init__(self, renderer, mesher, P, U):
+    def __init__(self, renderer, mesher, P, U, res_cont=None, res_mom=None):
         self.renderer = renderer
         self.mesher = mesher
         self.P = P
         self.U = U
         self.U_mag = np.linalg.norm(U, axis=1)
         
-        self.vars = ["Pressure", "Velocity"]
+        # === NEW: Capture local cell-by-cell residuals ===
+        self.res_cont = res_cont if res_cont is not None else np.zeros_like(P)
+        self.res_mom = res_mom if res_mom is not None else np.zeros_like(P)
+        
+        # === CHANGED: Added diagnostic options into your existing variables ===
+        self.vars = ["Pressure", "Velocity", "Continuity Error", "Momentum Error"]
         self.var_idx = 0
         self.last_var_idx = -1
         self.finished = False
@@ -31,7 +36,7 @@ class Visualizer:
 
         # Spatial Indexing Data
         self.centroids = []
-        self.cell_data_map = [] # To link a centroid back to its cell object and index
+        self.cell_data_map = [] 
         self.tree = None
 
         self._setup_geometry_vbo()
@@ -108,15 +113,42 @@ class Visualizer:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     def update_vbo_colors(self):
-        data = self.P if self.var_idx == 0 else self.U_mag
-        d_min, d_max = np.nanmin(data), np.nanmax(data)
-        denom = d_max - d_min if d_max != d_min else 1.0
-        f = np.clip((data - d_min) / denom, 0, 1)
+        """Maps physical fields or mathematical log-scaled residuals to vertex colors."""
+        # === CHANGED: Map variables based on combo selection ===
+        if self.var_idx == 0:
+            data = self.P
+            is_residual = False
+        elif self.var_idx == 1:
+            data = self.U_mag
+            is_residual = False
+        elif self.var_idx == 2:
+            data = self.res_cont
+            is_residual = True
+        elif self.var_idx == 3:
+            data = self.res_mom
+            is_residual = True
+
+        if is_residual:
+            # Residual values span orders of magnitude; use Log10 so variations aren't washed out
+            # We clip at 1e-10 to prevent log10(0) explosion errors
+            log_data = np.log10(np.maximum(data, 1e-10))
+            d_min, d_max = log_data.min(), log_data.max()
+            denom = d_max - d_min if d_max != d_min else 1.0
+            f = np.clip((log_data - d_min) / denom, 0, 1)
+        else:
+            # Standard linear interpolation for regular physical fields
+            d_min, d_max = np.nanmin(data), np.nanmax(data)
+            denom = d_max - d_min if d_max != d_min else 1.0
+            f = np.clip((data - d_min) / denom, 0, 1)
+
+        # Your beautiful native color map math
         r = np.clip(np.minimum(4 * f - 1.5, -4 * f + 4.5), 0, 1)
         g = np.clip(np.minimum(4 * f - 0.5, -4 * f + 3.5), 0, 1)
         b = np.clip(np.minimum(4 * f + 0.5, -4 * f + 2.5), 0, 1)
+        
         rgb = np.stack([r, g, b], axis=1).astype(np.float32)
         expanded_colors = np.repeat(rgb, self.cell_vertex_counts, axis=0)
+        
         glBindBuffer(GL_ARRAY_BUFFER, self.color_vbo)
         glBufferData(GL_ARRAY_BUFFER, expanded_colors.nbytes, expanded_colors, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -154,7 +186,6 @@ class Visualizer:
             m_pos = pygame.mouse.get_pos()
             world_m = camera.screen_to_world(m_pos)
             
-            # Find 5 nearest neighbors (broad phase)
             dist, indices = self.tree.query([world_m.x, world_m.y], k=5)
             
             for idx in indices:
@@ -166,12 +197,16 @@ class Visualizer:
                     imgui.text(f"U: {self.U_mag[idx]:.4f} m/s")
                     imgui.text(f"Ux: {self.U[idx,0]:.4f}")
                     imgui.text(f"Uy: {self.U[idx,1]:.4f}")
+                    imgui.separator()
+                    # === NEW: Show live localized mathematical errors on hover ===
+                    imgui.text(f"Cont Err: {self.res_cont[idx]:.4e}")
+                    imgui.text(f"Mom Err:  {self.res_mom[idx]:.4e}")
                     imgui.end()
                     break
 
         # Main Control Window
         imgui.set_next_window_position(10, 10, imgui.ALWAYS)
-        imgui.set_next_window_size(300, 240)
+        imgui.set_next_window_size(300, 260) # Expanded slightly for visibility
         imgui.begin("Post-Processor", True)
         _, self.var_idx = imgui.combo("Visualize", self.var_idx, self.vars)
         imgui.separator()
@@ -180,7 +215,13 @@ class Visualizer:
             changed_scale, self.vector_scale = imgui.slider_float("Vector Scale", self.vector_scale, 0.1, 50.0)
             if changed_scale: self._update_vector_vbo()
         imgui.separator()
-        data = self.P if self.var_idx == 0 else self.U_mag
+        
+        # === CHANGED: Dynamic range tracking for residuals vs fields ===
+        if self.var_idx == 0: data = self.P
+        elif self.var_idx == 1: data = self.U_mag
+        elif self.var_idx == 2: data = self.res_cont
+        elif self.var_idx == 3: data = self.res_mom
+        
         imgui.text(f"Range: {np.nanmin(data):.2e} to {np.nanmax(data):.2e}")
         if imgui.button("Return to Editor", width=-1, height=30): self.finished = True
         imgui.end()

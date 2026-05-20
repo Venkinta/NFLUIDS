@@ -13,7 +13,7 @@ class PhysicsEditor:
         self.lines = lines
         self.renderer = renderer
         self.finished = False
-
+        
         # --- Fluid Properties (always SI) ---
         self.density = 1.2       # kg/m3
         self.viscosity = 0.002   # Pa*s

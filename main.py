@@ -9,6 +9,7 @@ from solver import Solver
 from quad import Quad
 from camera import Camera
 from physics_editor import PhysicsEditor
+import pygame
 import OpenGL
 OpenGL.ERROR_CHECKING = False   # eliminates ~10M glCheckError calls per session
 OpenGL.ERROR_ON_COPY = False
@@ -123,7 +124,9 @@ def run_app():
                 physicseditor.viscosity,
             )
             solver.Solve()
-            visualizer = Visualizer(renderer, mesher, solver.P, solver.U)
+            visualizer = Visualizer(renderer, mesher, solver.P, solver.U,
+                                    res_cont=solver.final_res_cont, 
+                                    res_mom=solver.final_res_mom)
             current_state = "VISUALIZER"
 
         elif current_state == "VISUALIZER" and visualizer.finished:
