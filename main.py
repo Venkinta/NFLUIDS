@@ -11,7 +11,7 @@ from camera import Camera
 from physics_editor import PhysicsEditor
 import pygame
 import OpenGL
-OpenGL.ERROR_CHECKING = False   # eliminates ~10M glCheckError calls per session
+OpenGL.ERROR_CHECKING = False   # eliminates glCheckError calls
 OpenGL.ERROR_ON_COPY = False
 from OpenGL.GL import *
 import imgui
@@ -24,10 +24,12 @@ import pstats
 
 
 def run_app():
+    # Open pygame with default resolution and OPENGL
     pygame.init()
     WIDTH, HEIGHT = 1280, 720
     screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.DOUBLEBUF | pygame.OPENGL)
 
+    #OPENGL 
     def init_gpu(width, height):
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -43,77 +45,97 @@ def run_app():
     renderer = PygameRenderer()
     imgui.get_io().display_size = (WIDTH, HEIGHT)
 
-    # State objects
+    # State objects. These serve as initializers for our different modules in the future
     editor = Editor(screen, renderer)
     physicseditor = None
     mesher = None
     visualizer = None
 
+    #Initialize the EDITOR state, start the loop and set frames to 60fps. 
     current_state = "EDITOR"
     running = True
     dt = 1 / 60
     accumulator = 0.0
 
+    #Initialize our camera class, handler of all rendering. 
     camera = Camera()
     
-    # --- CHANGED: Dictionary to hold multiple VBOs ---
+    # --- Dictionary to hold multiple VBOs ---
     vbos = {} 
 
+
+    #Initialize main loop
     while running:
+        #Frame logic
         frame_time = clock.tick(60) / 1000.0
         accumulator += frame_time
 
+        """Pygame logic: Each frame you get events with pygame.event.get check documentation for full list. 
+            Simple loop logic: If X button, end the program"""
         events = pygame.event.get()
         for event in events:
             if event.type == pygame.QUIT:
                 running = False
 
+            # Camera handles rendering and zoom
             if event.type == pygame.MOUSEWHEEL:
                 camera.handle_zoom(pygame.mouse.get_pos(), event.y)
 
+            # MODULE logic handler each module switches when its own .finish() is called.
             if current_state == "EDITOR":
                 renderer.process_event(event)
                 if not imgui.get_io().want_capture_mouse:
                     editor.handle_event(event, camera)
+            
+            # Physics editor launches after the editor. It is responsible for controlling boundary conditions,
+            # meshing and solving parameters. 
             elif current_state == "PHYSICS":
                 physicseditor.renderer.process_event(event)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if not imgui.get_io().want_capture_mouse:
                         physicseditor.handle_selection(camera.screen_to_world(event.pos),camera)
-            elif current_state == "MESHER":
-                mesher.renderer.process_event(event)
+            #visualizer is a simple visual way to check results and residuals
             elif current_state == "VISUALIZER":
                 visualizer.renderer.process_event(event)
 
-        # State transitions
+
+        # State transitions. Hands off data from one module to another 
         if current_state == "EDITOR" and editor.finished:
+            #Needs to pass off all lines, the renderer object and the unit id for the global units
             physicseditor = PhysicsEditor(screen, editor.lines, renderer, editor.unit_idx)
             current_state = "PHYSICS"
 
-        elif current_state == "PHYSICS" and physicseditor.finished:
-            mesher = Mesher(
-                screen, physicseditor.lines, physicseditor.n_layers,
-                physicseditor.growth_factor, physicseditor.thickness,
-                physicseditor.boundary_spacing, physicseditor.r, renderer,
-                unit_to_meters=physicseditor.unit_to_meters
-            )
-            mesher.mesh()
-            
-            # --- GENERATE MULTIPLE VBOs ---
-            mesh_bundles = mesher.get_render_data() 
-            vbos = {} 
-            for key, (data, count) in mesh_bundles.items():
-                if count > 0:
-                    vbo_id = glGenBuffers(1)
-                    glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-                    glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
-                    vbos[key] = (vbo_id, count)
-            
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            current_state = "MESHER"
+        elif current_state == "PHYSICS":
+            # --- Mesh / Remesh ---
+            if physicseditor.mesh_requested:
+                physicseditor.mesh_requested = False
+                mesher = Mesher(
+                    screen, physicseditor.lines, physicseditor.n_layers,
+                    physicseditor.growth_factor, physicseditor.thickness,
+                    physicseditor.boundary_spacing, physicseditor.r, renderer,
+                    unit_to_meters=physicseditor.unit_to_meters
+                )
+                mesher.mesh()
 
-        elif current_state == "MESHER" and mesher.finished:
-            current_state = "SOLVER"
+                # Free any previous VBOs before uploading new ones
+                for _vbo_id, _ in vbos.values():
+                    glDeleteBuffers(1, [_vbo_id])
+                vbos = {}
+
+                mesh_bundles = mesher.get_render_data()
+                for key, (data, count) in mesh_bundles.items():
+                    if count > 0:
+                        vbo_id = glGenBuffers(1)
+                        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+                        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
+                        vbos[key] = (vbo_id, count)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                physicseditor.has_mesh = True
+
+            # --- Solve ---
+            if physicseditor.solve_requested:
+                physicseditor.solve_requested = False
+                current_state = "SOLVER"
 
         elif current_state == "SOLVER":
             solver = Solver(
@@ -131,6 +153,11 @@ def run_app():
 
         elif current_state == "VISUALIZER" and visualizer.finished:
             editor = Editor(screen, renderer)
+            physicseditor = None
+            mesher = None
+            for _vbo_id, _ in vbos.values():
+                glDeleteBuffers(1, [_vbo_id])
+            vbos = {}
             current_state = "EDITOR"
 
         while accumulator >= dt:
@@ -143,10 +170,7 @@ def run_app():
         if current_state == "EDITOR":
             editor.draw(screen, camera)
         elif current_state == "PHYSICS":
-            physicseditor.draw(screen, camera)
-        elif current_state == "MESHER":
-            # Pass the entire vbo dictionary to mesher.draw
-            mesher.draw(screen, camera, vbos) 
+            physicseditor.draw(screen, camera, vbos)
         elif current_state == "SOLVER":
             if vbos:
                 # Interior Triangles (Blue)

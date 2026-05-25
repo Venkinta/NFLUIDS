@@ -12,7 +12,11 @@ class PhysicsEditor:
     def __init__(self, screen, lines, renderer, initial_unit_idx=0):
         self.lines = lines
         self.renderer = renderer
-        self.finished = False
+
+        # Meshing / solving intent flags (read and reset by main.py)
+        self.mesh_requested = False
+        self.solve_requested = False
+        self.has_mesh = False
         
         # --- Fluid Properties (always SI) ---
         self.density = 1.2       # kg/m3
@@ -52,8 +56,17 @@ class PhysicsEditor:
         return math.hypot(dx, dy)
 
     # ------------------------------------------------------------------
-    def draw(self, screen, camera):
+    def draw(self, screen, camera, vbos=None):
         imgui.new_frame()
+
+        # --- Mesh overlay (drawn before imgui so UI sits on top) ---
+        if vbos:
+            if 'triangles' in vbos:
+                camera.draw_vbo(vbos['triangles'][0], vbos['triangles'][1], color=(0, 100, 255))
+            if 'quads' in vbos:
+                camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
+            if 'walls' in vbos:
+                camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
 
         u = self._unit_names[self._unit_idx]
 
@@ -141,8 +154,13 @@ class PhysicsEditor:
             _, self.r = imgui.input_float(f"Mesh size (min sep.) [{u}]", self.r, step=1.0, step_fast=10.0)
 
         imgui.separator()
-        if imgui.button("Proceed to Meshing"):
-            self.finish()
+        mesh_label = "Remesh" if self.has_mesh else "Mesh"
+        if imgui.button(mesh_label):
+            self.mesh_requested = True
+        if self.has_mesh:
+            imgui.same_line()
+            if imgui.button("Solve"):
+                self.solve_requested = True
         imgui.end()
 
         # ---- Per-Line Selection Popup ----
@@ -197,5 +215,4 @@ class PhysicsEditor:
         # Click on empty space -> deselect
         self.selected_line = None
 
-    def finish(self):
-        self.finished = True
+    # ------------------------------------------------------------------

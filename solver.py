@@ -270,7 +270,7 @@ class Solver:
     # SIMPLE loop
     # ------------------------------------------------------------------
 
-    def Solve(self, max_iterations=5000, tolerance=1e-6):
+    def Solve(self, max_iterations=600, tolerance=1e-6):
         """
         Main SIMPLE loop.
 
