@@ -557,7 +557,7 @@ class Mesher:
         Cells = valid_boundary_elements + self.triangulation.triangles
         Nc = len(Cells)
         print(f"[1/4] Cell gather           {time.perf_counter()-t:6.3f}s  ({Nc} cells: "
-              f"{len(valid_boundary_elements)} boundary + {len(self.triangulation.triangles)} interior)")
+            f"{len(valid_boundary_elements)} boundary + {len(self.triangulation.triangles)} interior)")
 
         # Cell centers and areas (world units → converted to SI below)
         cell_centers_wu = np.array([[c.centroid.x, c.centroid.y] for c in Cells], dtype=np.float64)
@@ -579,7 +579,7 @@ class Mesher:
         n_internal = sum(1 for ids in edge_map.values() if len(ids) > 1)
         n_boundary = Nf - n_internal
         print(f"[2/4] Edge map              {time.perf_counter()-t:6.3f}s  ({Nf} faces: "
-              f"{n_internal} internal, {n_boundary} boundary)")
+            f"{n_internal} internal, {n_boundary} boundary)")
 
         # 4. Populate Face Arrays (still in world units at this point)
         t = time.perf_counter()
@@ -643,10 +643,10 @@ class Mesher:
             magDf_wu[face_idx] = np.linalg.norm(df_vec)
 
         print(f"[3/4] Face arrays           {time.perf_counter()-t:6.3f}s  (BC tags: "
-              f"wall={np.sum(boundary_tags==0)}, "
-              f"inlet={np.sum(boundary_tags==1)}, "
-              f"outlet={np.sum(boundary_tags==2)}, "
-              f"internal={np.sum(boundary_tags==-1)})")
+            f"wall={np.sum(boundary_tags==0)}, "
+            f"inlet={np.sum(boundary_tags==1)}, "
+            f"outlet={np.sum(boundary_tags==2)}, "
+            f"internal={np.sum(boundary_tags==-1)})")
 
         # ----------------------------------------------------------------
         # 5. UNIT CONVERSION  — world units → SI metres

@@ -29,20 +29,79 @@ except ImportError:
 
 
 class Solver:
+    """
+        Solver receives handout from mesher/physics selector with dictionary of geometric information:
+            return {
+            'Nc':           int (Scalar)
+                            Total number of cells in mesh.
+                            
+            'Nf':           int (Scalar)
+                            Total number of unique faces (edges) in mesh.
+                            
+            'owner':        numpy.ndarray (shape: (Nf,), dtype: int32)
+                            ID of the cell that "owns" each face. Ranges from 0 to Nc-1.
+                            The mesher runs a loop which assigns the cell it encounters first (lower id)
+                            as the owner, and the other as the neighbor.
+                            
+            'neighbor':     numpy.ndarray (shape: (Nf,), dtype: int32)
+                            ID of the adjacent cell sharing each face. 
+                            Set to -1 if the face is an internal face. 
+                            (In practice there are no internal faces, only walls)
+                            
+            'Sf':           numpy.ndarray (shape: (Nf, 2), dtype: float64)
+                            Face area vectors in SI units [m]. Normal to the face, 
+                            scaled by face length, pointing outward from owner to neighbor.
+                            
+            'magSf':        numpy.ndarray (shape: (Nf,), dtype: float64)
+                            Magnitude of Sf in SI units [m]. Represents the physical 
+                            length of each 1D face/edge.
+                            
+            'Cf':           numpy.ndarray (shape: (Nf, 2), dtype: float64)
+                            Coordinates (x, y) of the face midpoints in SI units [m].
+                            
+            'df':           numpy.ndarray (shape: (Nf, 2), dtype: float64)
+                            Distance vectors in SI units [m]. 
+                            - Internal faces: Vector from owner cell center to neighbor cell center.
+                            - Boundary faces: Vector from owner cell center to face center (Cf).
+                            Important to later correct fluxes to account for skewed cells.
+                            
+            'magDf':        numpy.ndarray (shape: (Nf,), dtype: float64)
+                            Magnitude of df in SI units [m]. Scalar straight-line distance 
+                            represented by df.
+                            
+            'cell_centers': numpy.ndarray (shape: (Nc, 2), dtype: float64)
+                            Coordinates (x, y) of the geometric centroids for all cells 
+                            in SI units [m].
+                            
+            'cell_areas':   numpy.ndarray (shape: (Nc,), dtype: float64)
+                            Physical 2D surface areas of all cells in SI units [m²].
+                            
+            'boundary_tags': numpy.ndarray (shape: (Nf,), dtype: int64/int32)
+                            Boundary identifiers for each face:
+                            -1 = Internal face
+                             0 = Wall boundary
+                             1 = Inlet boundary
+                             2 = Outlet boundary
+        }
+"""
     def __init__(self, mesher_data, inlet_velocity, outlet_pressure, rho, viscosity):
+        # ---Physical parameters---
         self.inlet_velocity  = np.asarray(inlet_velocity, dtype=np.float64)
         self.outlet_pressure = float(outlet_pressure)
         self.rho             = float(rho)
         self.viscosity       = float(viscosity)
 
+        # ---Mesher data: number of cells and faces
         mesh = mesher_data
         self.Nc = mesh['Nc']
         self.Nf = mesh['Nf']
 
+        # ---Ownership ID's
         self.owner         = mesh['owner']
         self.neighbor      = mesh['neighbor']
         self.boundary_tags = mesh['boundary_tags']
 
+        # ---Values of cells and faces 
         self.Sf    = mesh['Sf']
         self.magSf = mesh['magSf']
         self.Cf    = mesh['Cf']
@@ -55,6 +114,7 @@ class Solver:
         self.cell_centers = mesh['cell_centers']
         self.cell_areas   = mesh['cell_areas']
 
+        #id's
         self.wall_faces     = np.where(self.boundary_tags == 0)[0]
         self.inlet_faces    = np.where(self.boundary_tags == 1)[0]
         self.outlet_faces   = np.where(self.boundary_tags == 2)[0]
@@ -93,14 +153,15 @@ class Solver:
         self._f_bnd  = np.concatenate([self.inlet_faces,
                                         self.outlet_faces,
                                         self.wall_faces])
-        self._own_b  = self.owner[self._f_bnd]
+        self._own_b  = self.owner[self._f_bnd] #grab owner id and Sf for each boundary face
         self._Sf_bnd = self.Sf[self._f_bnd]
 
         outlet_set = set(self.outlet_faces.tolist())
         self._is_outlet_bnd = np.array(
             [f in outlet_set for f in self._f_bnd], dtype=bool)
 
-        # Per-face-type aliases
+        # Per-face-type aliases, just separating everything for ease of use later, 
+        # and to reduce repeated computation each iteration (mesh doesn't change...)
         self._own_i   = self._grad_own
         self._nei_i   = self._grad_nei
         self._own_in  = self.owner[self.inlet_faces]
@@ -200,13 +261,20 @@ class Solver:
 
     def _solve_momentum(self, A, b, cache_key):
         """
-        BiCGSTAB + Jacobi (diagonal) preconditioner for momentum equations.
-
-        Momentum matrices are strongly diagonally dominant — the under-relaxation
-        step inflates every diagonal entry by 1/alpha (= 5×), so Jacobi
-        converges in very few BiCGSTAB iterations.  Jacobi application is a
-        single vector divide with zero triangular-solve overhead, eliminating
-        the dominant SuperLU.solve cost seen in the previous profiler run.
+        Solves the momentum linear system using BiCGSTAB with a Jacobi preconditioner.
+        
+        Momentum matrices are strongly diagonally dominant because the implicit 
+        under-relaxation step inflates the diagonal entries by 1/alpha. Assuming 
+        a standard alpha = 0.2, the diagonal is boosted by 5x, allowing a simple 
+        Jacobi preconditioner to achieve rapid convergence.
+        
+        Applying the Jacobi preconditioner is a trivial element-wise vector divide. 
+        This eliminates the heavy triangular-solve overhead of SuperLU discovered 
+        in previous profiler bottlenecks.
+        
+        If the tolerance (rtol=1e-3) fails to converge within 300 iterations, 
+        the solver falls back to a relaxed tolerance (rtol=1e-2) to avoid halting 
+        the global simulation loop.
         """
         diag = np.abs(A.diagonal())
         np.maximum(diag, 1e-30, out=diag)

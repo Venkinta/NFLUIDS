@@ -24,7 +24,7 @@ class Visualizer:
 
         # Vector Glyph Settings
         self.show_vectors = False
-        self.vector_scale = 10.0
+        self.vector_scale = 1
         self.vector_color = (1.0, 1.0, 1.0)
 
         # GPU Buffer IDs
@@ -212,7 +212,7 @@ class Visualizer:
         imgui.separator()
         changed, self.show_vectors = imgui.checkbox("Show Velocity Vectors", self.show_vectors)
         if self.show_vectors:
-            changed_scale, self.vector_scale = imgui.slider_float("Vector Scale", self.vector_scale, 0.1, 50.0)
+            changed_scale, self.vector_scale = imgui.slider_float("Vector Scale", self.vector_scale, 0.01, 50.0)
             if changed_scale: self._update_vector_vbo()
         imgui.separator()
         
