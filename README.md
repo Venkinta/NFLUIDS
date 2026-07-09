@@ -1,4 +1,4 @@
-# CFD TextEditor — Interactive 2D Navier-Stokes Solver
+# NFLUIDS — Modular 2D Navier-Stokes Solver
 
 A complete **2D Computational Fluid Dynamics (CFD) pipeline** with an interactive CAD frontend, built entirely in Python. Draw your geometry, assign boundary conditions, generate a hybrid mesh, solve the incompressible Navier-Stokes equations using the SIMPLE algorithm, and visualize results — all in one application.
 
