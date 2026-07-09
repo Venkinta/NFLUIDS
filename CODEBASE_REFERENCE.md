@@ -14,18 +14,22 @@
 | Units / scale wrong | `camera.py` (scale), `physics_editor.py` (defaults), `mesher.py → solver_data_pipeline()` |
 | UI / ImGui broken | whichever module's `draw()` method + `main.py` event handling |
 | State machine / screen transitions | `main.py` only |
+| Visualizer not showing results | `visualizer.py`, `main.py` SOLVER→VISUALIZER transition |
 
 ---
 
 ## 1. Architecture Overview
 
-The app is a **linear state machine**. Screens advance one-way:
+The app is a **state machine** with a forward pipeline and a loop-back:
 
 ```
-EDITOR  →  PHYSICS  →  MESHER  →  SOLVER
+EDITOR  →  PHYSICS  →  MESHER  →  SOLVER  →  VISUALIZER
+                                                    │
+                                                    ▼
+                                               EDITOR (loop)
 ```
 
-Managed entirely in `main.py`. There is no back-navigation. Each state owns its own module instance. The renderer (`PygameRenderer`) is created once in `main.py` and shared across all modules — **never re-create it**.
+Managed entirely in `main.py`. The VISUALIZER state can return to EDITOR (via the "Return to Editor" button), creating a full loop. Each state owns its own module instance. The renderer (`PygameRenderer`) is created once in `main.py` and shared across all modules — **never re-create it**.
 
 ---
 
@@ -116,10 +120,10 @@ Returns a `Point`. The returned Point may be a reference to an *existing* endpoi
 | Parameter | Default | Meaning |
 |---|---|---|
 | `n_layers` | 4 | Boundary layer count |
-| `growth_factor` | 1.4 | Layer thickness multiplier |
-| `thickness` | 4 | First layer thickness (world units) |
-| `boundary_spacing` | 35 | Arc length between boundary points (world units) |
-| `r` | 20 | Steiner point minimum separation (world units) |
+| `growth_factor` | 1.1 | Layer thickness multiplier |
+| `thickness` | 1.0 | First layer thickness (world units) |
+| `boundary_spacing` | 6.0 | Arc length between boundary points (world units) |
+| `r` | 4.0 | Steiner point minimum separation (world units) |
 | `inlet_velocity` | 1 | m/s (SI, not world units) |
 | `outlet_pressure` | 0 | Pa (SI) |
 | `density` | 1.2 | kg/m³ (SI) |
@@ -200,7 +204,7 @@ Both implement the same interface: `vertices()`, `edges()`, `centroid` (property
 ---
 
 ### `triangulation.py` — Triangle Container
-Thin wrapper over a list. `remove_triangle` uses `list.remove()` which relies on object identity, not coordinates. Safe because the same object is added and removed within Bowyer-Watson.
+O(1) add/remove container backed by a pre-allocated NumPy array. `remove_triangle` uses a `_tri_to_idx` dict (keyed by `id(triangle)`) for O(1) lookup, then swaps the vacated slot with the last row (swap-with-last) so the array stays compact. `coords` property returns a zero-copy view of the live rows — no list conversion, no `np.asarray` copy.
 
 ---
 
@@ -271,7 +275,7 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 3. **`frozenset` edges** — Triangle and Quad both use frozenset for edges. Changing to tuples breaks all dict lookups.
 4. **`orientCCW` mutation** — `constructor.orientCCW()` mutates the triangle. The Bowyer-Watson loop calls `checkCircumcentre` which calls `orientCCW`. Don't assume triangle vertex order is stable after this.
 5. **`polygon_orientation` sign convention** — Positive = CW in the shoelace convention used here (note: this is *opposite* to the standard mathematical convention where positive area = CCW). The `boundary_layer` normal-flip depends on this.
-6. **`build_polygon` comparison** — Uses `np.array_equal(pivot, line.a)` where `pivot` starts as `line.b` (a `Point`). This compares object identity through numpy, which works because line endpoints are shared Point objects from snap. If you ever regenerate Point objects from coordinates, this will break — use `Point.__eq__` instead.
+6. **`build_polygon` comparison** — Uses `pivot == line.a` (i.e. `Point.__eq__`). `Point.__eq__` now uses a tight tolerance (`math.isclose`, abs_tol=1e-9) so it is robust to small coordinate drift while still treating distinct vertices as distinct. **`Point.__hash__` is intentionally left as the exact coordinate hash** — Bowyer-Watson dedup (`set()` on Points) relies on bit-identical coordinates, so do NOT make `__hash__` tolerance-based.
 7. **`bc_map` string matching** — The strings in `bc_map` in `create_boundary_points()` must exactly match the `boundary_types` list in `physics_editor.py`.
 
 ---
@@ -280,8 +284,15 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 
 - `line.py`: `u_val`, `v_val`, `p_val` are unused (future per-line BC values).
 - `solver.py → health_check()` prints every iteration — verbose, should be gated.
-- `mesher.py → check_points()` method exists but is never called.
 - `data_structures.txt` is partially outdated — `magSf` was added later and is in the actual pipeline but not the txt.
-- `constructor.py → intersect()` is imported but not called in the current mesher flow.
-- `main.py`: fixed-update accumulator does nothing (`while accumulator >= dt: accumulator -= dt` with no body).
-- The 1.0 world-unit boundary tagging tolerance in `solver_data_pipeline()` is implicitly scale-dependent.
+- The solver runs synchronously in the SOLVER state and blocks the UI until convergence (no progress rendering mid-solve).
+
+### Resolved technical debt (this pass)
+- **Steiner grid OOB crash** — `get_grid_coords` in `create_steiner_points` now clamps indices to `[0, cols-1]`/`[0, rows-1]`, fixing an `IndexError` when a candidate landed exactly on the polygon bounds.
+- **`create_steiner_points` default `r=550`** aligned to `4.0` to match `physics_editor` (was a latent mismatch).
+- **`build_polygon` comparison** switched from `np.array_equal` (object identity through numpy) to `Point.__eq__` (tolerance-based) — see rule 6 above.
+- **`Point.__eq__`** now uses `math.isclose` (abs_tol=1e-9) instead of exact float equality; `__hash__` left exact on purpose.
+- **Boundary-face tagging tolerance** in `solver_data_pipeline()` is now `self.boundary_spacing` (scale-aware) instead of a hard-coded `1.0` world unit, so metre-scale geometries tag correctly.
+- **Visualizer probe centroid** now reuses `cell.centroid` (shoelace for quads) instead of a naive vertex average, matching the solver's geometry.
+- **Dead code removed**: `mesher.check_points()`, `mesher.create_boundary_layers()`, `constructor.intersect()`/`cross2d()`, and the empty `while accumulator >= dt` body in `main.py`.
+- **Misleading comment** in `editor.py` ("Default to meters") corrected to reflect the actual mm default.

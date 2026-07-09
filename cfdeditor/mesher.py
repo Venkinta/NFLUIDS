@@ -1,0 +1,689 @@
+import numpy as np
+from .line import Line
+from matplotlib.path import Path
+import numpy as np
+from .bowyerwatson import Bowyer_watson
+from .point import Point
+import pygame
+from .quad import Quad
+from shapely.geometry import Polygon as ShapelyPoly
+from shapely.geometry import Point as ShapelyPoint
+from .triangle import Triangle
+import time
+
+import cProfile
+import pstats
+
+import imgui
+from imgui.integrations.pygame import PygameRenderer
+
+
+class Mesher:
+    def __init__(self, screen, lines, n_layers, growth_factor, thickness, spacing, r, RENDERER,
+                 unit_to_meters=0.001):
+        """
+        unit_to_meters: conversion factor from world-units (CAD coords) to SI metres.
+                        0.001 for mm (default), 0.01 for cm, 1.0 for m.
+        All geometry parameters (thickness, spacing, r) must be in the same world-unit.
+        The solver receives everything converted to metres.
+        """
+        self.lines = lines
+        self.points = None
+        self.boundary_points = None
+        self.candidate_points = None
+        self.triangulation = None
+        self.orientation = None
+        self.thickness_mask = None
+
+        # Unit conversion
+        self.unit_to_meters = unit_to_meters
+
+        # Boundary layers
+        self.n_layers = n_layers
+        self.growth_factor = growth_factor
+        self.thickness = thickness
+        self.boundary_spacing = spacing
+
+        # Mesh generation
+        self.r = r
+
+        self.renderer = RENDERER
+        self.finished = False
+
+    def mesh(self):
+        t_total = time.perf_counter()
+        print("\n" + "="*50)
+        print("  MESHER  —  starting pipeline")
+        print("="*50)
+
+        # 1. Get the lines in the correct loop order
+        t = time.perf_counter()
+        ordered_lines = self.build_polygon()
+        print(f"[1/7] Polygon ordering      {time.perf_counter()-t:6.3f}s  ({len(ordered_lines)} edges)")
+
+        # 2. Calculate orientation
+        t = time.perf_counter()
+        vert_coords = [(line.a.x, line.a.y) for line in ordered_lines]
+        vert_array = np.array(vert_coords)
+        self.orientation = self.polygon_orientation(vert_array)
+        winding = "CW" if self.orientation > 0 else "CCW"
+        print(f"[2/7] Orientation           {time.perf_counter()-t:6.3f}s  ({winding})")
+
+        # 3. Create high-res boundary points
+        t = time.perf_counter()
+        self.create_boundary_points(ordered_lines)
+        print(f"[3/7] Boundary points       {time.perf_counter()-t:6.3f}s  ({len(self.boundary_points)} pts)")
+
+        # 4. Generate Layers
+        t = time.perf_counter()
+        layers = [self.boundary_points]
+        for i in range(self.n_layers):
+            current_factor_array = self.thickness_mask * self.thickness
+            next_layer = self.boundary_layer(layers[-1], current_factor_array)
+            layers.append(next_layer)
+            self.thickness *= self.growth_factor
+        print(f"[4/7] Boundary layers       {time.perf_counter()-t:6.3f}s  ({self.n_layers} layers)")
+
+        # 5. Connect them into Quads
+        t = time.perf_counter()
+        self.boundary_elements = self.connect_layers(layers)
+        print(f"[5/7] Layer connectivity    {time.perf_counter()-t:6.3f}s  ({len(self.boundary_elements)} quad/tri elements)")
+
+        # 6. Steiner points for interior
+        t = time.perf_counter()
+        inner_ring = layers[-1]
+        self.create_steiner_points(inner_ring, self.r)
+        n_steiner = len(self.points) if self.points is not None and len(self.points) > 0 else 0
+        print(f"[6/7] Steiner points        {time.perf_counter()-t:6.3f}s  ({n_steiner} interior pts)")
+
+        # 7. Bowyer-Watson triangulation + filter
+        t = time.perf_counter()
+        inner_ring_pts = [Point(p[0], p[1]) for p in inner_ring]
+        steiner_pts    = [Point(p[0], p[1]) for p in self.points]
+        all_interior_pts = inner_ring_pts + steiner_pts
+        n_input = len(all_interior_pts)
+        print(f"[7/7] Triangulating {n_input} points …")
+
+        self.triangulation = Bowyer_watson(all_interior_pts)
+        n_raw = len(self.triangulation.triangles)
+
+        self.filter_triangles(inner_ring)
+        n_final = len(self.triangulation.triangles)
+        elapsed = time.perf_counter() - t
+        print(f"      Bowyer-Watson done     {elapsed:6.3f}s  "
+              f"({n_raw} raw → {n_final} kept after filter)")
+
+        print("-"*50)
+        print(f"  Total meshing time: {time.perf_counter()-t_total:.3f}s")
+        print(f"  Generated {n_final} interior cells  +  {len(self.boundary_elements)} boundary cells")
+        print(f"  Grand total: {n_final + len(self.boundary_elements)} cells")
+        print("="*50 + "\n")
+
+    def create_boundary_points(self, ordered_lines):
+
+        all_points = []
+
+        all_thicknesses = []
+
+        all_bc_tags = []
+
+
+        bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2}
+
+        num_l = len(ordered_lines)
+
+
+        for i in range(num_l):
+
+            line = ordered_lines[i]
+
+            next_line = ordered_lines[(i + 1) % num_l]
+
+            prev_line = ordered_lines[(i - 1) % num_l]
+
+
+            start = np.array([line.a.x, line.a.y])
+
+            end = np.array([next_line.a.x, next_line.a.y])
+
+
+            line_vec = end - start
+
+            line_length = np.linalg.norm(line_vec)
+
+            if line_length == 0:
+
+                continue
+
+
+            n_points = max(1, int(np.floor(line_length / self.boundary_spacing)))
+
+            segment_points = np.linspace(start, end, n_points, endpoint=False)
+
+            all_points.append(segment_points)
+
+
+            if line.boundary_type == "Wall":
+
+                seg_thick = np.ones((n_points, 1))
+
+            else:
+
+                seg_thick = np.zeros((n_points, 1))
+
+
+            if line.boundary_type != "Wall" and prev_line.boundary_type == "Wall":
+
+                seg_thick[0] = 1.0
+
+            all_thicknesses.append(seg_thick)
+
+
+            tag = bc_map.get(line.boundary_type, 0)
+
+            seg_tags = np.full(n_points, tag)
+
+            all_bc_tags.append(seg_tags)
+
+
+        self.boundary_points = np.vstack(all_points)
+
+        self.thickness_mask = np.vstack(all_thicknesses)
+
+        self.point_bc_mask = np.concatenate(all_bc_tags) 
+
+    def create_steiner_points(self, boundary_points, r=4.0, k=30):
+        if boundary_points is None or len(boundary_points) < 3:
+            raise ValueError("Boundary polygon not defined properly.")
+
+        full_poly = ShapelyPoly(boundary_points)
+        safe_zone = full_poly.buffer(-r * 0.8)
+        xmin, ymin, xmax, ymax = full_poly.bounds
+
+        w = r / np.sqrt(2)
+        cols = int(np.ceil((xmax - xmin) / w))
+        rows = int(np.ceil((ymax - ymin) / w))
+
+
+        grid = np.full((cols, rows), None, dtype=object)
+        points = []
+        active = []
+
+        # Inline constants so the hot loop avoids repeated attribute lookups
+        _w_inv = 1.0 / w
+
+        def get_grid_coords(p):
+            gx = int((p[0] - xmin) * _w_inv)
+            gy = int((p[1] - ymin) * _w_inv)
+            # Clamp to valid grid indices: a candidate landing exactly on
+            # xmax/ymax yields gx == cols / gy == rows -> IndexError otherwise.
+            gx = 0 if gx < 0 else (cols - 1 if gx >= cols else gx)
+            gy = 0 if gy < 0 else (rows - 1 if gy >= rows else gy)
+            return gx, gy
+
+        found_start = False
+        attempts = 0
+        while not found_start and attempts < 1000:
+            attempts += 1
+            p0 = np.random.uniform([xmin, ymin], [xmax, ymax])
+            if safe_zone.contains(ShapelyPoint(p0)):
+                points.append(p0)
+                active.append(p0)
+                gx, gy = get_grid_coords(p0)
+                grid[gx, gy] = p0
+                found_start = True
+
+        if not found_start:
+            print("Could not find a starting point inside the polygon!")
+            self.points = np.array([])
+            return
+
+        while active:
+            idx = np.random.randint(len(active))
+            base_point = active[idx]
+            found = False
+
+            for _ in range(k):
+                angle = np.random.uniform(0, 2 * np.pi)
+                rad = np.random.uniform(r, 2 * r)
+                candidate = base_point + rad * np.array([np.cos(angle), np.sin(angle)])
+
+                if not (xmin <= candidate[0] <= xmax and ymin <= candidate[1] <= ymax):
+                    continue
+
+                gx, gy = get_grid_coords(candidate)
+                is_far_enough = True
+                r_sq = r * r
+                # Ternary clamps avoid 4 Python builtin calls per candidate
+                i0 = gx - 2 if gx > 2 else 0
+                i1 = gx + 3 if gx + 3 < cols else cols
+                j0 = gy - 2 if gy > 2 else 0
+                j1 = gy + 3 if gy + 3 < rows else rows
+                for i in range(i0, i1):
+                    for j in range(j0, j1):
+                        neighbor = grid[i, j]
+                        if neighbor is not None:
+                            diff = candidate - neighbor
+                            if diff[0]*diff[0] + diff[1]*diff[1] < r_sq:
+                                is_far_enough = False
+                                break
+                    if not is_far_enough:
+                        break
+
+
+                if not is_far_enough:
+                    continue
+
+                if not safe_zone.contains(ShapelyPoint(candidate)):
+                    continue
+
+                points.append(candidate)
+                active.append(candidate)
+                grid[gx, gy] = candidate
+                found = True
+                break
+
+            if not found:
+                active.pop(idx)
+
+        self.points = np.array(points)
+
+    def build_polygon(self):
+        remaining = self.lines.copy()
+        first = remaining.pop(0)
+        ordered_lines = [first]
+        pivot = first.b
+
+        while remaining:
+            found = False
+            for i, line in enumerate(remaining):
+                if pivot == line.a:
+                    pivot = line.b
+                    ordered_lines.append(line)
+                    remaining.pop(i)
+                    found = True
+                    break
+                elif pivot == line.b:
+                    pivot = line.a
+                    ordered_lines.append(line)
+                    remaining.pop(i)
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError("Lines do not form a closed loop")
+
+        return ordered_lines
+
+    def polygon_orientation(self, polygon_array):
+        x = polygon_array[:, 0]
+        y = polygon_array[:, 1]
+        area = np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+        return area  # area < 0 is CCW, area > 0 is CW
+
+    def draw(self, screen, camera, vbos=None):
+        imgui.new_frame()
+
+        # If we have generated the VBO dictionary, use the fast GPU path
+        if vbos:
+            if 'triangles' in vbos:
+                camera.draw_vbo(vbos['triangles'][0], vbos['triangles'][1], color=(0, 100, 255))
+            if 'quads' in vbos:
+                camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
+            if 'walls' in vbos:
+                camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
+        else:
+            # Fallback (Slow object loop) if VBOs aren't ready yet
+            if hasattr(self, "lines"):
+                for line in self.lines:
+                    line.draw(screen, camera, color=(255, 255, 255), width=2)
+            if hasattr(self, 'boundary_elements'):
+                for quad in self.boundary_elements:
+                    quad.draw(screen, camera)
+            if hasattr(self, "triangulation") and self.triangulation:
+                self.triangulation.draw(screen, camera)
+
+        imgui.begin("Solver")
+        if imgui.button("Proceed to Solving"):
+            self.finish()
+        imgui.end()
+
+        imgui.render()
+        self.renderer.render(imgui.get_draw_data())
+        
+    def get_render_data(self):
+        """Categorizes mesh elements into bundles for multi-colored wireframe rendering."""
+        # Bundle 1: Unstructured Interior (Triangles)
+        tri_coords = []
+        if hasattr(self, 'triangulation') and self.triangulation:
+            for t in self.triangulation.triangles:
+                # Store as 3 line segments (6 points) for wireframe
+                pts = [t.a, t.b, t.b, t.c, t.c, t.a]
+                for pt in pts:
+                    tri_coords.extend([pt.x, pt.y])
+
+        # Bundle 2: Boundary Layers (Quads)
+        quad_coords = []
+        if hasattr(self, 'boundary_elements'):
+            for q in self.boundary_elements:
+                p = q.points  # FIX: Access the .points list from the Quad class
+                # Store as 4 line segments (8 points)
+                pts = [p[0], p[1], p[1], p[2], p[2], p[3], p[3], p[0]]
+                for pt in pts:
+                    quad_coords.extend([pt.x, pt.y])
+
+        # Bundle 3: The original CAD wall lines
+        wall_coords = []
+        for line in self.lines:
+            wall_coords.extend([line.a.x, line.a.y, line.b.x, line.b.y])
+
+        return {
+            'triangles': (np.array(tri_coords, dtype=np.float32), len(tri_coords) // 2),
+            'quads': (np.array(quad_coords, dtype=np.float32), len(quad_coords) // 2),
+            'walls': (np.array(wall_coords, dtype=np.float32), len(wall_coords) // 2)
+        }
+    
+    def boundary_layer(self, polygon_points, current_thickness_array):
+        """
+        polygon_points: Nx2 array of the current layer's points
+        current_thickness_array: Nx1 array containing the target thickness for each point
+        """
+        n = len(polygon_points)
+        new_points = np.zeros_like(polygon_points)
+
+        # 1. Calculate standard edge vectors and normals
+        next_points = np.roll(polygon_points, -1, axis=0)
+        edges = next_points - polygon_points
+        edge_lengths = np.linalg.norm(edges, axis=1)[:, np.newaxis]
+        unit_edges = edges / np.where(edge_lengths > 1e-9, edge_lengths, 1.0)
+
+        # Determine edge normals based on polygon orientation
+        if self.orientation > 0:
+            edge_normals = np.column_stack([-unit_edges[:, 1], unit_edges[:, 0]])
+        else:
+            edge_normals = np.column_stack([unit_edges[:, 1], -unit_edges[:, 0]])
+
+        # 2. Compute standard vertex miter normals
+        prev_edge_normals = np.roll(edge_normals, 1, axis=0)
+        vertex_normals = prev_edge_normals + edge_normals
+        v_norm = np.linalg.norm(vertex_normals, axis=1)[:, np.newaxis]
+        vertex_normals = np.where(v_norm > 1e-9, vertex_normals / v_norm, edge_normals)
+
+        cos_theta = np.sum(vertex_normals * edge_normals, axis=1)[:, np.newaxis]
+        miter_lengths = 1.0 / np.maximum(cos_theta, 0.1)
+
+        # 3. --- CONSTRAINED CORNER OVERRIDE ---
+        # Look at the point BC tags to find where Wall (0) meets Inlet/Outlet (1 or 2)
+        for i in range(n):
+            current_tag = self.point_bc_mask[i]
+            prev_tag = self.point_bc_mask[(i - 1) % n]
+            
+            # Case A: Moving from an Inlet/Outlet to a Wall
+            if prev_tag != 0 and current_tag == 0:
+                # Force the extrusion vector to point exactly along the previous edge (the Inlet)
+                inlet_vector = -unit_edges[(i - 1) % n]  # Pointing into the domain along the inlet
+                vertex_normals[i] = inlet_vector
+                
+                # Adjust length so the normal thickness relative to the wall remains correct
+                # For a 90-degree corner, dot product is 1.0, so length multiplier is 1.0
+                wall_normal = edge_normals[i]
+                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                miter_lengths[i] = 1.0 / max(projection, 0.1)
+
+            # Case B: Moving from a Wall to an Inlet/Outlet
+            elif prev_tag == 0 and current_tag != 0:
+                # Force the extrusion vector to point exactly along the current edge (the Inlet)
+                inlet_vector = unit_edges[i] 
+                vertex_normals[i] = inlet_vector
+                
+                wall_normal = edge_normals[(i - 1) % n]
+                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                miter_lengths[i] = 1.0 / max(projection, 0.1)
+                
+                # Ensure this point actually moves (it belongs to the inlet patch now, 
+                # but it must stretch to accommodate the neighboring wall's thickness)
+                current_thickness_array[i] = current_thickness_array[(i - 1) % n]
+
+        # 4. Generate the new layer points
+        new_points = polygon_points + vertex_normals * (miter_lengths * current_thickness_array)
+        return new_points
+
+    def connect_layers(self, layers):
+        import math
+        elements = []
+
+        for i in range(len(layers) - 1):
+            current_layer = layers[i]
+            next_layer = layers[i + 1]
+            num_points = len(current_layer)
+
+            for j in range(num_points):
+                j_next = (j + 1) % num_points
+
+                p1 = self._to_point(current_layer[j])
+                p2 = self._to_point(current_layer[j_next])
+                p3 = self._to_point(next_layer[j_next])
+                p4 = self._to_point(next_layer[j])
+
+                area = 0.5 * abs((p1.x*p2.y + p2.x*p3.y + p3.x*p4.y + p4.x*p1.y) -
+                                  (p2.x*p1.y + p3.x*p2.y + p4.x*p3.y + p1.x*p4.y))
+                if area < 1e-4:
+                    continue
+
+                tol = 1e-4
+                d12 = math.hypot(p1.x - p2.x, p1.y - p2.y)
+                d23 = math.hypot(p2.x - p3.x, p2.y - p3.y)
+                d34 = math.hypot(p3.x - p4.x, p3.y - p4.y)
+                d41 = math.hypot(p4.x - p1.x, p4.y - p1.y)
+
+                if d12 < tol:
+                    elements.append(Triangle(p2, p3, p4))
+                elif d23 < tol:
+                    elements.append(Triangle(p1, p3, p4))
+                elif d34 < tol:
+                    elements.append(Triangle(p1, p2, p3))
+                elif d41 < tol:
+                    elements.append(Triangle(p1, p2, p3))
+                else:
+                    elements.append(Quad(p1, p2, p3, p4))
+
+        return elements
+
+    def _to_point(self, p):
+        if isinstance(p, Point):
+            return p
+        return Point(p[0], p[1])
+
+    def filter_triangles(self, inner_ring_points):
+        ring_path = Path(inner_ring_points)
+        # Snapshot the list before any removal (swap-with-last changes order)
+        current_tris = list(self.triangulation.triangles)
+        centroids = np.array([[t.centroid.x, t.centroid.y] for t in current_tris],
+                             dtype=np.float64)
+        mask = ring_path.contains_points(centroids, radius=-1e-5)
+
+        # Collect first, then remove — safe against swap-with-last reordering
+        to_remove = [t for t, keep in zip(current_tris, mask) if not keep]
+        for t in to_remove:
+            self.triangulation.remove_triangle(t)
+
+    # ------------------------------------------------------------------
+    def solver_data_pipeline(self):
+        """
+        Builds the mesh data dict for the Solver.
+        ALL coordinates and distances are converted to SI metres by multiplying
+        with self.unit_to_meters.  Areas are multiplied by unit_to_meters².
+        """
+        t_pipe = time.perf_counter()
+        print("\n" + "="*50)
+        print("  DATA PIPELINE  —  mesh → solver handoff")
+        print("="*50)
+        s  = self.unit_to_meters
+        s2 = s * s
+
+        def get_edge_key(p_a, p_b):
+            ax = p_a.x if hasattr(p_a, 'x') else p_a[0]
+            ay = p_a.y if hasattr(p_a, 'y') else p_a[1]
+            bx = p_b.x if hasattr(p_b, 'x') else p_b[0]
+            by = p_b.y if hasattr(p_b, 'y') else p_b[1]
+            k1 = (round(float(ax), 6), round(float(ay), 6))
+            k2 = (round(float(bx), 6), round(float(by), 6))
+            return tuple(sorted([k1, k2]))
+
+        # 1. BC lookup (in world units — used only for tagging, no conversion needed)
+        bc_lookup = {}
+        for i in range(len(self.boundary_points)):
+            p1 = self.boundary_points[i]
+            p2 = self.boundary_points[(i + 1) % len(self.boundary_points)]
+            edge_key = get_edge_key(p1, p2)
+            bc_lookup[edge_key] = self.point_bc_mask[i]
+
+        bp = self.boundary_points
+        b_mids = (bp + np.roll(bp, -1, axis=0)) / 2.0   # precomputed once
+
+        # 2. Gather all cells
+        t = time.perf_counter()
+        valid_boundary_elements = [c for c in self.boundary_elements if float(c.area) > 1e-8]
+        Cells = valid_boundary_elements + self.triangulation.triangles
+        Nc = len(Cells)
+        print(f"[1/4] Cell gather           {time.perf_counter()-t:6.3f}s  ({Nc} cells: "
+            f"{len(valid_boundary_elements)} boundary + {len(self.triangulation.triangles)} interior)")
+
+        # Cell centers and areas (world units → converted to SI below)
+        cell_centers_wu = np.array([[c.centroid.x, c.centroid.y] for c in Cells], dtype=np.float64)
+        cell_areas_wu   = np.array([float(c.area) for c in Cells], dtype=np.float64)
+
+        # 3. Build Edge Map
+        t = time.perf_counter()
+        edge_map = {}
+        for cell_id, cell in enumerate(Cells):
+            for edge in cell.edges():
+                if len(edge) != 2:
+                    continue
+                p_a, p_b = edge
+                key = get_edge_key(p_a, p_b)
+                if key not in edge_map:
+                    edge_map[key] = []
+                edge_map[key].append(cell_id)
+        Nf = len(edge_map)
+        n_internal = sum(1 for ids in edge_map.values() if len(ids) > 1)
+        n_boundary = Nf - n_internal
+        print(f"[2/4] Edge map              {time.perf_counter()-t:6.3f}s  ({Nf} faces: "
+            f"{n_internal} internal, {n_boundary} boundary)")
+
+        # 4. Populate Face Arrays (still in world units at this point)
+        t = time.perf_counter()
+        Nf = len(edge_map)
+        owner    = np.zeros(Nf, dtype=np.int32)
+        neighbor = np.full(Nf, -1, dtype=np.int32)
+        Sf_wu    = np.zeros((Nf, 2))
+        Cf_wu    = np.zeros((Nf, 2))
+        df_wu    = np.zeros((Nf, 2))
+        magDf_wu = np.zeros(Nf)
+        boundary_tags = np.full(Nf, -1)
+
+        print(f"DEBUG: bc_lookup contains {len(bc_lookup)} total boundary edges.")
+        print(f"DEBUG: Unique tags found in lookup: {set(bc_lookup.values())}")
+        boundary_edge_count = sum(1 for ids in edge_map.values() if len(ids) == 1)
+        print(f"DEBUG: edge_map has {boundary_edge_count} boundary candidates.")
+
+        for face_idx, (edge_key, cell_ids) in enumerate(edge_map.items()):
+            owner[face_idx] = cell_ids[0]
+
+            if len(cell_ids) > 1:
+                neighbor[face_idx] = cell_ids[1]
+                boundary_tags[face_idx] = -1
+            else:
+                p1_raw, p2_raw = edge_key
+                face_mid = (np.array(p1_raw) + np.array(p2_raw)) / 2.0
+
+                diffs    = b_mids - face_mid
+                sq_dist  = diffs[:, 0]**2 + diffs[:, 1]**2
+                min_idx  = int(np.argmin(sq_dist))
+                min_dist = np.sqrt(sq_dist[min_idx])
+                assigned_tag = self.point_bc_mask[min_idx]
+
+                # Scale-aware tolerance: boundary points are spaced at
+                # `boundary_spacing` world units, so a true boundary face
+                # midpoint is always within ~spacing/2 of a boundary midpoint.
+                # (Previously a hard-coded 1.0 world unit, which broke at m scale.)
+                tol = self.boundary_spacing
+                if min_dist < tol:
+                    boundary_tags[face_idx] = assigned_tag
+                else:
+                    boundary_tags[face_idx] = 0
+
+            # Geometry (world units)
+            p1_coords, p2_coords = edge_key
+            p1 = np.array(p1_coords)
+            p2 = np.array(p2_coords)
+            face_center = (p1 + p2) / 2.0
+            vec    = p2 - p1
+            normal = np.array([vec[1], -vec[0]])
+
+            owner_c = cell_centers_wu[owner[face_idx]]
+            if np.dot(normal, face_center - owner_c) < 0:
+                normal = -normal
+
+            Sf_wu[face_idx] = normal
+            Cf_wu[face_idx] = face_center
+
+            if neighbor[face_idx] != -1:
+                df_vec = cell_centers_wu[neighbor[face_idx]] - owner_c
+            else:
+                df_vec = face_center - owner_c
+
+            df_wu[face_idx]    = df_vec
+            magDf_wu[face_idx] = np.linalg.norm(df_vec)
+
+        print(f"[3/4] Face arrays           {time.perf_counter()-t:6.3f}s  (BC tags: "
+            f"wall={np.sum(boundary_tags==0)}, "
+            f"inlet={np.sum(boundary_tags==1)}, "
+            f"outlet={np.sum(boundary_tags==2)}, "
+            f"internal={np.sum(boundary_tags==-1)})")
+
+        # ----------------------------------------------------------------
+        # 5. UNIT CONVERSION  — world units → SI metres
+        #    Lengths × s,  Areas × s²,  Normals (Sf) are edge-length vectors × s
+        # ----------------------------------------------------------------
+        t = time.perf_counter()
+        cell_centers_si = cell_centers_wu * s
+        cell_areas_si   = cell_areas_wu   * s2
+        Sf_si           = Sf_wu   * s
+        Cf_si           = Cf_wu   * s
+        df_si           = df_wu   * s
+        magDf_si        = magDf_wu * s
+        magSf_si        = np.linalg.norm(Sf_si, axis=1)
+        print(f"[4/4] Unit conversion (×{s}) {time.perf_counter()-t:6.3f}s")
+        print(f"      cell_areas:  [{cell_areas_si.min():.3e}, {cell_areas_si.max():.3e}] m²")
+        print(f"      cell_centers:[{cell_centers_si.min():.4f},  {cell_centers_si.max():.4f}] m")
+
+        cells_in_faces = set(owner) | set(neighbor[neighbor != -1])
+        all_cells      = set(range(Nc))
+        orphan_cells   = all_cells - cells_in_faces
+        if orphan_cells:
+            print(f"⚠️  MESHER BUG: {len(orphan_cells)} cells have NO faces!")
+        else:
+            print(f"      Connectivity OK — no orphan cells")
+
+        print("-"*50)
+        print(f"  Pipeline total: {time.perf_counter()-t_pipe:.3f}s  →  solver ready")
+        print("="*50 + "\n")
+
+        return {
+            'Nc':           Nc,
+            'Nf':           Nf,
+            'owner':        owner,
+            'neighbor':     neighbor,
+            'Sf':           Sf_si,
+            'magSf':        magSf_si,
+            'Cf':           Cf_si,
+            'df':           df_si,
+            'magDf':        magDf_si,
+            'cell_centers': cell_centers_si,
+            'cell_areas':   cell_areas_si,
+            'boundary_tags': boundary_tags,
+        }
+
+    def finish(self):
+        self.finished = True

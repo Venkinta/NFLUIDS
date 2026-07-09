@@ -17,3 +17,17 @@ venv/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Numba cache
+__nbcache__/
+*.nbc
+*.nbi
+
+# ImGui settings (now in home directory)
+*.ini
