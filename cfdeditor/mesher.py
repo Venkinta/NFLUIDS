@@ -75,6 +75,10 @@ class Mesher:
 
         # 4. Generate Layers
         t = time.perf_counter()
+        # Capture the *original* first-layer thickness before the growth loop
+        # mutates self.thickness.  solver_data_pipeline() saves this so a
+        # reloaded mesh restores the value the user actually entered.
+        self._orig_thickness = self.thickness
         layers = [self.boundary_points]
         for i in range(self.n_layers):
             current_factor_array = self.thickness_mask * self.thickness
@@ -714,6 +718,16 @@ class Mesher:
             'cell_nverts':   cell_nverts,
             'cell_types':    cell_types,
             'cad_lines':     cad_lines,
+            # --- Meshing parameters (ride along for save/load; solver ignores) ---
+            # `thickness` is the *original* first-layer value the user entered
+            # (mesh() mutates self.thickness via the growth loop, so we saved
+            # the captured original in self._orig_thickness).
+            'n_layers':          self.n_layers,
+            'growth_factor':     self.growth_factor,
+            'thickness':         getattr(self, '_orig_thickness', self.thickness),
+            'boundary_spacing':  self.boundary_spacing,
+            'r':                 self.r,
+            'unit_to_meters':    self.unit_to_meters,
         }
 
 

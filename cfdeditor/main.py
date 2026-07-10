@@ -28,7 +28,7 @@ import pstats
 def run_app():
     # Open pygame with default resolution and OPENGL
     pygame.init()
-    WIDTH, HEIGHT = 1280, 720
+    WIDTH, HEIGHT = 1920, 1080
     screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.DOUBLEBUF | pygame.OPENGL)
 
     #OPENGL 
@@ -151,6 +151,21 @@ def run_app():
                     line.boundary_type = bc_names[int(bc_idx)]
                     lines.append(line)
                 physicseditor.lines = lines
+
+                # Restore the meshing parameters so the UI reflects the values
+                # that produced the saved mesh (instead of the defaults).
+                physicseditor.n_layers         = int(loaded['n_layers'])
+                physicseditor.growth_factor    = float(loaded['growth_factor'])
+                physicseditor.thickness        = float(loaded['thickness'])
+                physicseditor.boundary_spacing = float(loaded['boundary_spacing'])
+                physicseditor.r                = float(loaded['r'])
+                physicseditor.unit_to_meters   = float(loaded['unit_to_meters'])
+                # Restore the World-units combo index to match the saved unit.
+                _unit_factors = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+                for i, name in enumerate(["mm", "cm", "m"]):
+                    if abs(_unit_factors[name] - physicseditor.unit_to_meters) < 1e-12:
+                        physicseditor._unit_idx = i
+                        break
 
                 # Build coloured wireframe VBOs from cell_vertices in the
                 # loaded dict. The dict stores SI metres; convert back to

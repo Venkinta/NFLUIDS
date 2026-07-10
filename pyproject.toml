@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.0.1"
+version = "1.0.2"
 description = "Interactive 2D CFD Solver with CAD Frontend"
 readme = "README.md"
 license = {text = "MIT"}

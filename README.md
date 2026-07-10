@@ -43,6 +43,12 @@ Load Mesh  →  Inspect / Edit BCs  →  (Remesh)  →  Solve  →  Visualize
 - The **Reynolds number** estimator gives a DNS cell count prediction.
 - Click **"Mesh"** to generate the computational grid.
 
+When you **Load Mesh**, the saved meshing parameters (number of layers, growth
+factor, first-layer thickness, boundary spacing, mesh size, and the world-unit
+selection) are restored into the PHYSICS panel, so the UI reflects the values
+that produced the loaded mesh. The CAD lines and their boundary types are also
+reconstructed, so you can edit conditions or remesh before solving.
+
 ### 3. Solve (SOLVER)
 The solver runs automatically after meshing. It uses the **SIMPLE algorithm** with:
 - Rhie-Chow interpolation for pressure-velocity coupling.
