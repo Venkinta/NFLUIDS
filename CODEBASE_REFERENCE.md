@@ -164,6 +164,13 @@ The most complex module. Four main phases:
 - Calls `Bowyer_watson(all_interior_pts)`.
 - `filter_triangles()` removes triangles outside the inner ring using `matplotlib.path.Path.contains_points`.
 
+#### Distance-Weighted Interpolation (`_gx_int`)
+- Computed once in `_precompute_topology()` as `self._gx_int = d_Pf / d_PN`, where `d_Pf` is the distance from the owner cell center to the shared face midpoint and `d_PN` is the total owner→neighbor center distance (`magDf`).
+- Replaces the implicit **0.5 arithmetic mean** (`0.5 * (U_own + U_nei)`) with proper distance-weighted interpolation: `U_interp = (1 - g_x) * U_own + g_x * U_nei`.
+- Applied consistently to: velocity interpolation at faces (`U_interp` in `_compute_rhie_chow_flux` and `SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION`), pressure gradient interpolation (`gP_f`), coupling coefficient `a_P_f` (the `d = Sf²/a_P` term), cell volume/area interpolation (`vol_f`), and pressure face value `p_face` in the momentum RHS.
+- **Why it matters:** On a uniform mesh `g_x = 0.5` exactly, so behavior is identical to before. On a refined/non-uniform mesh (small refined cell next to a large coarse cell), the face midpoint is much closer to the small cell's center — the 0.5 average biased interpolation toward the wrong cell, creating artificial pressure gradients that made refinement zones behave like solid bodies (numerical "resistance"). The distance-weighted form is the textbook-correct approach for non-uniform/skewed unstructured meshes and is what makes the v1.2.0 refinement zones numerically sound.
+- Precomputed once (mesh topology is fixed during the solve) — zero per-iteration cost.
+
 #### `solver_data_pipeline()`
 The final output generator. Returns the mesh dict the Solver expects. Key steps:
 1. Builds `bc_lookup` (edge → BC tag) from boundary points.
@@ -280,6 +287,7 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 5. **`polygon_orientation` sign convention** — Positive = CW in the shoelace convention used here (note: this is *opposite* to the standard mathematical convention where positive area = CCW). The `boundary_layer` normal-flip depends on this.
 6. **`build_polygon` comparison** — Uses `pivot == line.a` (i.e. `Point.__eq__`). `Point.__eq__` now uses a tight tolerance (`math.isclose`, abs_tol=1e-9) so it is robust to small coordinate drift while still treating distinct vertices as distinct. **`Point.__hash__` is intentionally left as the exact coordinate hash** — Bowyer-Watson dedup (`set()` on Points) relies on bit-identical coordinates, so do NOT make `__hash__` tolerance-based.
 7. **`bc_map` string matching** — The strings in `bc_map` in `create_boundary_points()` must exactly match the `boundary_types` list in `physics_editor.py`.
+8. **Distance-weighted interpolation (`_gx_int`)** — The solver uses `self._gx_int = d_Pf / d_PN` (distance from owner cell center to face midpoint, over total owner→neighbor distance) for all face interpolations (velocity, pressure gradient, coupling coefficient `a_P_f`, cell volume, `p_face`). Do NOT replace this with a fixed `0.5` arithmetic mean — on non-uniform/refined meshes the 0.5 average biases interpolation toward the wrong cell, creating artificial pressure gradients that make refinement zones behave like solid bodies. On uniform meshes `g_x = 0.5` exactly, so the distance-weighted form is strictly a superset.
 
 ---
 

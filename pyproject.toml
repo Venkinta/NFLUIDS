@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.2.0"
-description = "Interactive 2D CFD Solver with CAD Frontend — Mesh refinement zones"
+version = "1.3.0"
+description = "Interactive 2D CFD Solver with CAD Frontend — Distance-weighted solver interpolation for non-uniform meshes"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

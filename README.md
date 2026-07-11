@@ -90,6 +90,7 @@ Progress is printed to the console every 10 iterations.
 - Incompressible Navier-Stokes (SIMPLE algorithm)
 - Finite-volume discretization on arbitrary polygonal meshes
 - Rhie-Chow interpolation to prevent checkerboarding
+- **Distance-weighted face interpolation** (`g_x = d_Pf / d_PN`) for correct behavior on non-uniform/refined meshes — makes refinement zones numerically sound (no artificial "resistance" at cell-size transitions)
 - Multiple linear solver backends (BiCGSTAB + Jacobi/ILU/PyAMG)
 - Numba JIT compilation for hot loops
 
