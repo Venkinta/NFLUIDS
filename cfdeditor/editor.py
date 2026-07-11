@@ -89,10 +89,65 @@ class Editor:
             removed_line = self.lines.pop()
             print("Last line removed.")
 
+    def check_loops(self):
+        """Analyze current lines and return a list of loop statuses.
+        Returns: (all_closed: bool, statuses: list of strings)
+        """
+        remaining = self.lines.copy()
+        statuses = []
+        all_closed = True
+        
+        loop_idx = 1
+        while remaining:
+            first = remaining.pop(0)
+            ordered = [first]
+            pivot = first.b
+            closed = False
+            while True:
+                if pivot == ordered[0].a:
+                    closed = True
+                    break
+                found = False
+                for i, line in enumerate(remaining):
+                    if pivot == line.a:
+                        pivot = line.b
+                        ordered.append(line)
+                        remaining.pop(i)
+                        found = True
+                        break
+                    elif pivot == line.b:
+                        pivot = line.a
+                        ordered.append(line)
+                        remaining.pop(i)
+                        found = True
+                        break
+                if not found:
+                    break
+            
+            if closed:
+                statuses.append(f"Loop {loop_idx}: OK (Closed)")
+            else:
+                statuses.append(f"Loop {loop_idx}: OPEN!")
+                all_closed = False
+            loop_idx += 1
+            
+        if not self.lines:
+            return True, ["No geometry drawn yet."]
+        return all_closed, statuses
+
+    def new_loop(self):
+        """Finalize the current chain (if any) and start a fresh, disconnected
+        loop.  The mesher groups all drawn lines into separate closed loops by
+        connectivity, so this just breaks the chain so the next click begins a
+        new loop (e.g. a hole inside the domain)."""
+        self.is_drawing = False
+        self.start_pos = None
+        print("New loop started.")
+
     # Update click logic to convert FIRST
     def _handle_click(self, screen_mouse_pos, camera):
         world_mouse_pos = camera.screen_to_world(screen_mouse_pos)
-        snapped_pos = self.snap_engine.get_snapped_pos(
+        snapped_pos, is_vertex_snap = self.snap_engine.get_snapped_pos(
             world_mouse_pos, self.lines, camera.scale, self.start_pos
         )
 
@@ -100,8 +155,11 @@ class Editor:
             self.start_pos = snapped_pos
             self.is_drawing = True
         else:
-            # Apply our exact measurements before creating the line
-            final_pos = self._apply_constraints(self.start_pos, snapped_pos)
+            # If vertex snapped, use it exactly to guarantee watertight closure
+            if is_vertex_snap:
+                final_pos = snapped_pos
+            else:
+                final_pos = self._apply_constraints(self.start_pos, snapped_pos)
             new_line = Line(self.start_pos, final_pos)
             self.lines.append(new_line)
             self.start_pos = final_pos # Chain to next line
@@ -124,9 +182,22 @@ class Editor:
         _, self.ortho_mode = imgui.checkbox("Ortho (90° Snap)", self.ortho_mode)
         _, self.target_length = imgui.input_float("Exact Length (0 = Free)", self.target_length, step=0.1)
         imgui.separator()
+
+        all_closed, loop_statuses = self.check_loops()
+        for status in loop_statuses:
+            color = (0.2, 1.0, 0.2, 1.0) if "OK" in status else (1.0, 0.8, 0.2, 1.0)
+            imgui.text_colored(status, *color)
+            
+        if not all_closed:
+            imgui.text_colored("⚠️ Warning: Open loops detected!", 1.0, 0.4, 0.4, 1.0)
         
         if imgui.button("Finish CAD"):
             self.finish()
+        imgui.same_line()
+        if imgui.button("New Loop"):
+            self.new_loop()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Break the current chain to start a new disconnected shape (e.g. a hole).")
         imgui.end()
 
         # --- NEW: Draw World Origin (0,0) ---
@@ -141,12 +212,15 @@ class Editor:
 
         if self.is_drawing and self.start_pos:
             world_mouse = camera.screen_to_world(self.current_mouse_pos)
-            snapped_pos = self.snap_engine.get_snapped_pos(
+            snapped_pos, is_vertex_snap = self.snap_engine.get_snapped_pos(
                 world_mouse, self.lines, camera.scale, self.start_pos
             )
             
-            # Apply constraints to the preview line
-            target_world_pos = self._apply_constraints(self.start_pos, snapped_pos)
+            # If vertex snapped, use it exactly (otherwise apply constraints)
+            if is_vertex_snap:
+                target_world_pos = snapped_pos
+            else:
+                target_world_pos = self._apply_constraints(self.start_pos, snapped_pos)
             
             p1_screen = camera.to_screen(self.start_pos)
             p2_screen = camera.to_screen(target_world_pos)

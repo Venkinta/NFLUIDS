@@ -33,6 +33,9 @@ Load Mesh  →  Inspect / Edit BCs  →  (Remesh)  →  Solve  →  Visualize
   - **Units** — Choose mm, cm, or m for your drawing.
   - **Ortho (90° Snap)** — Constrain lines to horizontal/vertical.
   - **Exact Length** — Set a fixed line length (set to 0 for free drawing).
+  - **Loop status** displayed in real-time — green "OK (Closed)" or yellow "OPEN!" with a warning if any loops are incomplete.
+  - **"New Loop" button** — Breaks the drawing chain to start a separate shape (e.g. a hole). Hover for a tooltip explanation.
+- **Vertex snapping** always takes priority over constraints, guaranteeing watertight loop closure.
 - Click **"Finish CAD"** to proceed.
 
 ### 2. Assign Boundary Conditions (PHYSICS)
@@ -69,12 +72,17 @@ Progress is printed to the console every 10 iterations.
 - Vertex and axis snapping for precise geometry
 - Orthogonal mode, exact lengths, configurable snap step
 - Multiple unit systems (mm, cm, m)
+- Real-time loop closure validation with warnings
+- "New Loop" button for drawing holes and disconnected shapes
 - OpenGL-backed smooth rendering
 
 ### Mesh Generation
 - **Boundary layers**: Prismatic cells at walls with controlled growth rate
 - **Interior mesh**: Poisson-disk Steiner point sampling + Delaunay triangulation (Bowyer-Watson)
 - Hybrid mesh with quadrilaterals (boundary) and triangles (interior)
+- **Multi-loop support**: Automatically detects outer boundary and internal holes via per-loop orientation analysis
+- **Conformal hole meshing**: Triangle vertices from all loop layers feed into the triangulation, ensuring watertight connectivity between prisms and interior cells
+- **Robust triangle filter**: Shapely polygon-intersection test removes any triangle that crosses a hole or outer boundary
 - Numba-accelerated circumcircle checks
 
 ### Solver
@@ -101,7 +109,7 @@ Progress is printed to the console every 10 iterations.
 | `numpy` | Array computations |
 | `scipy` | Sparse linear algebra (BiCGSTAB, ILU) |
 | `numba` | JIT compilation for hot loops |
-| `shapely` | Polygon geometry (Poisson-disk sampling) |
+| `shapely` | Polygon geometry (Poisson-disk sampling + triangle filtering) |
 | `matplotlib` | Path containment tests (triangle filtering) |
 | `pyamg` (optional) | Algebraic multigrid preconditioner |
 
@@ -112,9 +120,9 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | File | Purpose |
 |------|---------|
 | `main.py` | Application entry point, state machine, main loop |
-| `editor.py` | CAD drawing with snapping and constraints |
+| `editor.py` | CAD drawing with snapping, constraints, loop validation |
 | `physics_editor.py` | Boundary condition and mesh parameter UI |
-| `mesher.py` | Mesh generation pipeline |
+| `mesher.py` | Mesh generation pipeline (multi-loop, holes) |
 | `solver.py` | SIMPLE algorithm (Navier-Stokes solver) |
 | `visualizer.py` | Post-processing and field visualization |
 | `camera.py` | World↔screen coordinate transforms, drawing primitives |
@@ -132,7 +140,6 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 
 - **Units migration in progress**: The solver expects SI units (metres). The mesher→solver handoff converts world units to metres via `unit_to_meters`, and boundary-face tagging tolerance is now scale-aware (`boundary_spacing`), so metre-scale geometries tag correctly. CAD defaults still assume mm.
 - **Per-line BC values** (`u_val`, `v_val`, `p_val` on `Line`) are declared but not yet used by the solver.
-- **No unit tests** — currently relies on visual verification and console output.
 - **Solver runs synchronously** in the SOLVER state and blocks the UI until convergence (no progress rendering mid-solve).
 
 ## Technical Background

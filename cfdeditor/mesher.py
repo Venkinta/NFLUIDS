@@ -55,54 +55,98 @@ class Mesher:
         print("  MESHER  —  starting pipeline")
         print("="*50)
 
-        # 1. Get the lines in the correct loop order
+        # 1. Group the CAD lines into separate closed loops (outer + holes)
         t = time.perf_counter()
-        ordered_lines = self.build_polygon()
-        print(f"[1/7] Polygon ordering      {time.perf_counter()-t:6.3f}s  ({len(ordered_lines)} edges)")
+        self.loops = self.build_polygon()
+        n_edges = sum(len(l) for l in self.loops)
+        print(f"[1/7] Polygon ordering      {time.perf_counter()-t:6.3f}s  "
+              f"({n_edges} edges across {len(self.loops)} loops)")
 
-        # 2. Calculate orientation
+        # 2. Per-loop orientation; the loop with the largest absolute area is
+        #    the outer boundary, the rest are holes.
         t = time.perf_counter()
-        vert_coords = [(line.a.x, line.a.y) for line in ordered_lines]
-        vert_array = np.array(vert_coords)
-        self.orientation = self.polygon_orientation(vert_array)
-        winding = "CW" if self.orientation > 0 else "CCW"
-        print(f"[2/7] Orientation           {time.perf_counter()-t:6.3f}s  ({winding})")
+        self.loop_orientations = []
+        for loop in self.loops:
+            vert_array = np.array([(line.a.x, line.a.y) for line in loop])
+            self.loop_orientations.append(self.polygon_orientation(vert_array))
+        abs_areas = [abs(o) for o in self.loop_orientations]
+        self.outer_idx = int(np.argmax(abs_areas))
+        windings = ["CW" if o > 0 else "CCW" for o in self.loop_orientations]
+        print(f"[2/7] Orientation           {time.perf_counter()-t:6.3f}s  "
+              f"(outer=loop {self.outer_idx}; " + ", ".join(windings) + ")")
 
-        # 3. Create high-res boundary points
+        # 3. High-res boundary points, sampled per loop then concatenated
         t = time.perf_counter()
-        self.create_boundary_points(ordered_lines)
-        print(f"[3/7] Boundary points       {time.perf_counter()-t:6.3f}s  ({len(self.boundary_points)} pts)")
+        self.loop_boundary_points = []
+        self.loop_thickness_masks = []
+        self.loop_bc_masks        = []
+        self.loop_point_counts    = []
+        self.boundary_points = None
+        self.thickness_mask  = None
+        self.point_bc_mask   = None
+        for loop in self.loops:
+            bp, tm, bm = self.create_boundary_points(loop)
+            self.loop_boundary_points.append(bp)
+            self.loop_thickness_masks.append(tm)
+            self.loop_bc_masks.append(bm)
+            self.loop_point_counts.append(len(bp))
+            self.boundary_points = (bp if self.boundary_points is None
+                                    else np.vstack([self.boundary_points, bp]))
+            self.thickness_mask = (tm if self.thickness_mask is None
+                                   else np.vstack([self.thickness_mask, tm]))
+            self.point_bc_mask = (bm if self.point_bc_mask is None
+                                  else np.concatenate([self.point_bc_mask, bm]))
+        print(f"[3/7] Boundary points       {time.perf_counter()-t:6.3f}s  "
+              f"({len(self.boundary_points)} pts)")
 
-        # 4. Generate Layers
+        # 4. Boundary layers — extrude each loop independently.  The outer
+        #    loop grows toward its interior (the domain); holes grow toward
+        #    their *exterior* (also the domain), so their normal is flipped.
         t = time.perf_counter()
         # Capture the *original* first-layer thickness before the growth loop
         # mutates self.thickness.  solver_data_pipeline() saves this so a
         # reloaded mesh restores the value the user actually entered.
         self._orig_thickness = self.thickness
-        layers = [self.boundary_points]
-        for i in range(self.n_layers):
-            current_factor_array = self.thickness_mask * self.thickness
-            next_layer = self.boundary_layer(layers[-1], current_factor_array)
-            layers.append(next_layer)
-            self.thickness *= self.growth_factor
-        print(f"[4/7] Boundary layers       {time.perf_counter()-t:6.3f}s  ({self.n_layers} layers)")
+        full_bc_mask = self.point_bc_mask
+        self.loop_layer_stacks = []
+        for li, loop_pts in enumerate(self.loop_boundary_points):
+            # Scope per-loop state consumed by boundary_layer()
+            self.orientation   = self.loop_orientations[li]
+            self.point_bc_mask = self.loop_bc_masks[li]
+            is_outer = (li == self.outer_idx)
+            layers = [loop_pts]
+            for _ in range(self.n_layers):
+                current_factor_array = self.loop_thickness_masks[li] * self.thickness
+                next_layer = self.boundary_layer(
+                    layers[-1], current_factor_array,
+                    extrude_toward_interior=is_outer)
+                layers.append(next_layer)
+                self.thickness *= self.growth_factor
+            self.loop_layer_stacks.append(layers)
+        self.point_bc_mask = full_bc_mask  # restore full concatenated mask
+        self.boundary_elements = []
+        for stack in self.loop_layer_stacks:
+            self.boundary_elements.extend(self.connect_layers(stack))
+        print(f"[4/7] Boundary layers       {time.perf_counter()-t:6.3f}s  "
+              f"({self.n_layers} layers × {len(self.loops)} loops)")
 
-        # 5. Connect them into Quads
+        # 5. Steiner points for the interior (domain may contain holes)
         t = time.perf_counter()
-        self.boundary_elements = self.connect_layers(layers)
-        print(f"[5/7] Layer connectivity    {time.perf_counter()-t:6.3f}s  ({len(self.boundary_elements)} quad/tri elements)")
-
-        # 6. Steiner points for interior
-        t = time.perf_counter()
-        inner_ring = layers[-1]
-        self.create_steiner_points(inner_ring, self.r)
-        n_steiner = len(self.points) if self.points is not None and len(self.points) > 0 else 0
+        inner_rings = [stack[-1] for stack in self.loop_layer_stacks]
+        self.create_steiner_points(inner_rings, self.r)
+        n_steiner = (len(self.points) if self.points is not None
+                     and len(self.points) > 0 else 0)
         print(f"[6/7] Steiner points        {time.perf_counter()-t:6.3f}s  ({n_steiner} interior pts)")
 
-        # 7. Bowyer-Watson triangulation + filter
+        # 6. Bowyer-Watson triangulation + filter (compound region)
         t = time.perf_counter()
-        inner_ring_pts = [Point(p[0], p[1]) for p in inner_ring]
-        steiner_pts    = [Point(p[0], p[1]) for p in self.points]
+        # Collect inner ring points from ALL loops (outer + holes) to ensure triangles connect to them
+        inner_ring_pts = []
+        for ring in inner_rings:
+            for p in ring:
+                inner_ring_pts.append(Point(p[0], p[1]))
+        steiner_pts    = ([Point(p[0], p[1]) for p in self.points]
+                         if n_steiner else [])
         all_interior_pts = inner_ring_pts + steiner_pts
         n_input = len(all_interior_pts)
         print(f"[7/7] Triangulating {n_input} points …")
@@ -110,7 +154,7 @@ class Mesher:
         self.triangulation = Bowyer_watson(all_interior_pts)
         n_raw = len(self.triangulation.triangles)
 
-        self.filter_triangles(inner_ring)
+        self.filter_triangles(inner_rings, self.outer_idx)
         n_final = len(self.triangulation.triangles)
         elapsed = time.perf_counter() - t
         print(f"      Bowyer-Watson done     {elapsed:6.3f}s  "
@@ -123,6 +167,12 @@ class Mesher:
         print("="*50 + "\n")
 
     def create_boundary_points(self, ordered_lines):
+        """Sample boundary points along a single ordered loop.
+
+        Returns (points, thickness_mask, bc_tags) arrays for this loop.  The
+        caller concatenates the per-loop results into the instance attributes
+        consumed by solver_data_pipeline().
+        """
 
         all_points = []
 
@@ -189,17 +239,26 @@ class Mesher:
             all_bc_tags.append(seg_tags)
 
 
-        self.boundary_points = np.vstack(all_points)
+        return (np.vstack(all_points),
+                np.vstack(all_thicknesses),
+                np.concatenate(all_bc_tags))
 
-        self.thickness_mask = np.vstack(all_thicknesses)
+    def create_steiner_points(self, inner_rings, r=4.0, k=30):
+        """Sample interior Steiner points for a domain that may contain holes.
 
-        self.point_bc_mask = np.concatenate(all_bc_tags) 
-
-    def create_steiner_points(self, boundary_points, r=4.0, k=30):
-        if boundary_points is None or len(boundary_points) < 3:
+        `inner_rings` is a list of Nx2 arrays, one per loop, where
+        `inner_rings[self.outer_idx]` is the outer boundary and the rest are
+        holes.  A Shapely polygon-with-holes is built so the Poisson-disk
+        rejection test automatically avoids the hole interiors.
+        """
+        if not inner_rings or len(inner_rings[self.outer_idx]) < 3:
             raise ValueError("Boundary polygon not defined properly.")
 
-        full_poly = ShapelyPoly(boundary_points)
+        outer_coords = [tuple(p) for p in inner_rings[self.outer_idx]]
+        hole_coords = [[tuple(p) for p in ring]
+                      for i, ring in enumerate(inner_rings)
+                      if i != self.outer_idx and len(ring) >= 3]
+        full_poly = ShapelyPoly(outer_coords, hole_coords)
         safe_zone = full_poly.buffer(-r * 0.8)
         xmin, ymin, xmax, ymax = full_poly.bounds
 
@@ -292,31 +351,44 @@ class Mesher:
         self.points = np.array(points)
 
     def build_polygon(self):
+        """Group the (possibly disconnected) CAD lines into separate closed
+        loops.  Each loop is a list of Line objects ordered head-to-tail.
+        The loop with the largest absolute area is treated as the outer
+        boundary; all others are holes (handled later via orientation).
+        """
         remaining = self.lines.copy()
-        first = remaining.pop(0)
-        ordered_lines = [first]
-        pivot = first.b
-
+        loops = []
         while remaining:
-            found = False
-            for i, line in enumerate(remaining):
-                if pivot == line.a:
-                    pivot = line.b
-                    ordered_lines.append(line)
-                    remaining.pop(i)
-                    found = True
+            first = remaining.pop(0)
+            ordered = [first]
+            pivot = first.b
+            closed = False
+            while True:
+                # Loop closed when we return to the start vertex
+                if pivot == ordered[0].a:
+                    closed = True
                     break
-                elif pivot == line.b:
-                    pivot = line.a
-                    ordered_lines.append(line)
-                    remaining.pop(i)
-                    found = True
+                found = False
+                for i, line in enumerate(remaining):
+                    if pivot == line.a:
+                        pivot = line.b
+                        ordered.append(line)
+                        remaining.pop(i)
+                        found = True
+                        break
+                    elif pivot == line.b:
+                        pivot = line.a
+                        ordered.append(line)
+                        remaining.pop(i)
+                        found = True
+                        break
+                if not found:
                     break
-
-            if not found:
-                raise ValueError("Lines do not form a closed loop")
-
-        return ordered_lines
+            if not closed:
+                raise ValueError("Lines do not form a closed loop "
+                                 f"({len(ordered)} edges, not closed)")
+            loops.append(ordered)
+        return loops
 
     def polygon_orientation(self, polygon_array):
         x = polygon_array[:, 0]
@@ -384,7 +456,8 @@ class Mesher:
             'walls': (np.array(wall_coords, dtype=np.float32), len(wall_coords) // 2)
         }
     
-    def boundary_layer(self, polygon_points, current_thickness_array):
+    def boundary_layer(self, polygon_points, current_thickness_array,
+                       extrude_toward_interior=True):
         """
         polygon_points: Nx2 array of the current layer's points
         current_thickness_array: Nx1 array containing the target thickness for each point
@@ -445,8 +518,26 @@ class Mesher:
                 # but it must stretch to accommodate the neighboring wall's thickness)
                 current_thickness_array[i] = current_thickness_array[(i - 1) % n]
 
-        # 4. Generate the new layer points
-        new_points = polygon_points + vertex_normals * (miter_lengths * current_thickness_array)
+        # 4. Generate the new layer points.
+        # Make the extrusion direction robust to how the loop was drawn:
+        #   * outer loop  -> grow toward the loop centroid (into the domain)
+        #   * hole loop   -> grow away from the loop centroid (also into the
+        #                    domain, since the fluid surrounds the hole)
+        # This avoids depending on the user drawing holes in a particular
+        # winding order.
+        displacement = vertex_normals * (miter_lengths * current_thickness_array)
+        centroid = np.mean(polygon_points, axis=0)
+        to_centroid = centroid - polygon_points
+        for i in range(n):
+            d = displacement[i]
+            toward = np.dot(d, to_centroid[i])
+            if extrude_toward_interior:
+                if toward < 0:
+                    displacement[i] = -d
+            else:
+                if toward > 0:
+                    displacement[i] = -d
+        new_points = polygon_points + displacement
         return new_points
 
     def connect_layers(self, layers):
@@ -495,16 +586,42 @@ class Mesher:
             return p
         return Point(p[0], p[1])
 
-    def filter_triangles(self, inner_ring_points):
-        ring_path = Path(inner_ring_points)
+    def filter_triangles(self, inner_rings, outer_idx):
+        """Keep only triangles whose centroid lies inside the domain, i.e.
+        inside the outer loop's inner ring but outside every hole's inner
+        ring, and make sure they don't cross any boundaries.
+        """
+        if not inner_rings or len(inner_rings[outer_idx]) < 3:
+            return
+
+        # Build fluid domain polygon using Shapely
+        outer_coords = [tuple(p) for p in inner_rings[outer_idx]]
+        hole_coords = [[tuple(p) for p in ring]
+                      for i, ring in enumerate(inner_rings)
+                      if i != outer_idx and len(ring) >= 3]
+        domain_poly = ShapelyPoly(outer_coords, hole_coords)
+
         # Snapshot the list before any removal (swap-with-last changes order)
         current_tris = list(self.triangulation.triangles)
-        centroids = np.array([[t.centroid.x, t.centroid.y] for t in current_tris],
-                             dtype=np.float64)
-        mask = ring_path.contains_points(centroids, radius=-1e-5)
 
-        # Collect first, then remove — safe against swap-with-last reordering
-        to_remove = [t for t, keep in zip(current_tris, mask) if not keep]
+        to_remove = []
+        for t in current_tris:
+            t_poly = ShapelyPoly([(t.a.x, t.a.y), (t.b.x, t.b.y), (t.c.x, t.c.y)])
+            # Centroid check
+            centroid = ShapelyPoint(t.centroid.x, t.centroid.y)
+            if not domain_poly.contains(centroid):
+                to_remove.append(t)
+                continue
+
+            # Robust overlap check (avoid crossing boundaries)
+            try:
+                overlap_area = t_poly.intersection(domain_poly).area
+                if overlap_area < 0.98 * t_poly.area:
+                    to_remove.append(t)
+            except Exception:
+                # Fallback to centroid if intersection fails due to topology edge cases
+                pass
+
         for t in to_remove:
             self.triangulation.remove_triangle(t)
 
@@ -531,16 +648,28 @@ class Mesher:
             k2 = (round(float(bx), 6), round(float(by), 6))
             return tuple(sorted([k1, k2]))
 
-        # 1. BC lookup (in world units — used only for tagging, no conversion needed)
+        # 1. BC lookup — built PER LOOP so the wrap-around does not connect
+        #    the last point of one loop to the first of the next (which would
+        #    create a spurious boundary edge between the outer loop and a hole).
         bc_lookup = {}
-        for i in range(len(self.boundary_points)):
-            p1 = self.boundary_points[i]
-            p2 = self.boundary_points[(i + 1) % len(self.boundary_points)]
-            edge_key = get_edge_key(p1, p2)
-            bc_lookup[edge_key] = self.point_bc_mask[i]
+        offset = 0
+        for cnt in self.loop_point_counts:
+            seg = self.boundary_points[offset:offset + cnt]
+            for i in range(cnt):
+                p1 = seg[i]
+                p2 = seg[(i + 1) % cnt]
+                edge_key = get_edge_key(p1, p2)
+                bc_lookup[edge_key] = self.point_bc_mask[offset + i]
+            offset += cnt
 
-        bp = self.boundary_points
-        b_mids = (bp + np.roll(bp, -1, axis=0)) / 2.0   # precomputed once
+        # Per-loop boundary midpoints (concatenated, aligned with point_bc_mask)
+        b_mids_list = []
+        offset = 0
+        for cnt in self.loop_point_counts:
+            seg = self.boundary_points[offset:offset + cnt]
+            b_mids_list.append((seg + np.roll(seg, -1, axis=0)) / 2.0)
+            offset += cnt
+        b_mids = np.vstack(b_mids_list)   # precomputed once
 
         # 2. Gather all cells
         t = time.perf_counter()

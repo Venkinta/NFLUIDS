@@ -5,6 +5,9 @@ class SnapEngine:
         self.pixel_radius = pixel_radius
 
     def get_snapped_pos(self, current_world_pos, lines, camera_scale, anchor_pos=None):
+        """Returns (snapped_point, is_vertex_snap)
+        is_vertex_snap is True only when a vertex was snapped to (exact match).
+        """
         wx, wy = current_world_pos.x, current_world_pos.y
         world_radius = self.pixel_radius / camera_scale
         world_sq_radius = world_radius ** 2
@@ -17,10 +20,9 @@ class SnapEngine:
         for pt in all_points:
             dist_sq = (wx - pt.x)**2 + (wy - pt.y)**2
             if dist_sq <= world_sq_radius:
-                return pt
+                return pt, True  # (snapped_vertex, is_vertex_snap=True)
 
-        # 2. PRIORITY: Global Alignment & Axis Locking
-        # We check the start point (anchor) AND every other vertex in the scene
+        # 2. SECONDARY: Global Alignment & Axis Locking (not a perfect snap)
         snap_x, snap_y = None, None
         
         # Check anchor (for perfect vertical/horizontal lines)
@@ -38,4 +40,4 @@ class SnapEngine:
         final_x = snap_x if snap_x is not None else wx
         final_y = snap_y if snap_y is not None else wy
         
-        return Point(final_x, final_y)
+        return Point(final_x, final_y), False  # (aligned_point, is_vertex_snap=False)
