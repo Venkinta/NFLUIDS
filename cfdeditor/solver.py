@@ -199,6 +199,20 @@ class Solver:
         self._mom_csr   = self._build_csr_template(mom_rows,   mom_cols)
         self._pcorr_csr = self._build_csr_template(pcorr_rows, pcorr_cols)
 
+        # --- DISTANCE-WEIGHTED INTERPOLATION FACTOR ---
+        # Coordinates of owner cell centers and internal face centers
+        cc_own = self.cell_centers[self.owner[f_int]]
+        cf_int = self.Cf[f_int]
+        
+        # Distance from owner cell center to the shared face midpoint
+        d_Pf = np.linalg.norm(cf_int - cc_own, axis=1)
+        
+        # Total distance between owner and neighbor centers (magDf)
+        d_PN = self.magDf[f_int]
+        
+        # g_x is the geometric weight assigned to the neighbor cell
+        self._gx_int = d_Pf / np.maximum(d_PN, 1e-10)
+
     # ------------------------------------------------------------------
     # CSR precomputation helpers
     # ------------------------------------------------------------------
@@ -208,13 +222,6 @@ class Solver:
         Precompute the CSR sparsity structure and scatter-add index for a
         matrix whose (row, col) pattern is fixed but whose values change
         every iteration.
-
-        Returns a dict with:
-          indptr     : CSR row pointer array (Nc+1,)
-          indices    : CSR column index array (nnz_unique,)
-          scatter    : for each COO entry k, scatter[k] = position in CSR data
-                       where it should be accumulated (handles duplicates)
-          n_unique   : number of unique (row, col) pairs = nnz of the matrix
         """
         Nc = self.Nc
         n  = len(rows)
@@ -266,19 +273,6 @@ class Solver:
     def _solve_momentum(self, A, b, cache_key):
         """
         Solves the momentum linear system using BiCGSTAB with a Jacobi preconditioner.
-        
-        Momentum matrices are strongly diagonally dominant because the implicit 
-        under-relaxation step inflates the diagonal entries by 1/alpha. Assuming 
-        a standard alpha = 0.2, the diagonal is boosted by 5x, allowing a simple 
-        Jacobi preconditioner to achieve rapid convergence.
-        
-        Applying the Jacobi preconditioner is a trivial element-wise vector divide. 
-        This eliminates the heavy triangular-solve overhead of SuperLU discovered 
-        in previous profiler bottlenecks.
-        
-        If the tolerance (rtol=1e-3) fails to converge within 300 iterations, 
-        the solver falls back to a relaxed tolerance (rtol=1e-2) to avoid halting 
-        the global simulation loop.
         """
         diag = np.abs(A.diagonal())
         np.maximum(diag, 1e-30, out=diag)
@@ -296,15 +290,6 @@ class Solver:
     def _solve_pressure(self, A, b):
         """
         BiCGSTAB + preconditioner for the pressure-correction equation.
-
-        Primary: PyAMG (algebraic multigrid) if installed — optimal O(N) for
-                 Laplacian-type problems.  `pip install pyamg` to enable.
-        Fallback: ILU with fill_factor=8.  fill_factor=4 (previous default) was
-                  too weak for larger meshes — it caused ~82 BiCGSTAB iterations
-                  per pressure solve and ultimately stalled SIMPLE convergence.
-                  fill_factor=8 brings that back to ~16 iterations.
-
-        Preconditioner is rebuilt every _precond_interval SIMPLE iterations.
         """
         refresh = (
             self._iteration % self._precond_interval == 0 or
@@ -462,28 +447,29 @@ class Solver:
         own    = self._own_i
         nei    = self._nei_i
 
-        # Central part
-        U_interp = 0.5 * (U_2d[own] + U_2d[nei])
+        # Distance-weighted velocity interpolation
+        U_interp = (1.0 - self._gx_int)[:, None] * U_2d[own] + self._gx_int[:, None] * U_2d[nei]
         phi_star = self.rho * np.einsum('fj,fj->f', U_interp, self._Sf_int)
 
         # Rhie‑Chow correction
-        # Use cached pressure gradient (computed earlier in this iteration)
         if self._last_grad_P is None:
-            # fallback, should not happen
             self._last_grad_P = self.calculate_pressure_gradients()
-        gP_f = 0.5 * (self._last_grad_P[own] + self._last_grad_P[nei])
+            
+        # Distance-weighted pressure gradient interpolation
+        gP_f = (1.0 - self._gx_int)[:, None] * self._last_grad_P[own] + self._gx_int[:, None] * self._last_grad_P[nei]
 
-        # Face coefficient: interpolated (1/a_P) * volume face
-        # a_P_f = 0.25*(a_P_u[own] + a_P_u[nei] + a_P_v[own] + a_P_v[nei])
-        a_P_f = np.maximum(0.25 * (a_P_u[own] + a_P_u[nei] +
-                                   a_P_v[own] + a_P_v[nei]), 1e-10)
+        # Distance-weighted diagonal matrix coefficients
+        a_P_own = 0.5 * (a_P_u[own] + a_P_v[own])
+        a_P_nei = 0.5 * (a_P_u[nei] + a_P_v[nei])
+        a_P_f = np.maximum((1.0 - self._gx_int) * a_P_own + self._gx_int * a_P_nei, 1e-10)
 
         magSf_int = self.magSf[f_int]
         n_f       = self._Sf_int / magSf_int[:, None]
         dp_interp = np.einsum('fj,fj->f', gP_f, n_f)
         dp_actual = (self.P[nei] - self.P[own]) / self.magDf[f_int]
 
-        vol_f  = 0.5 * (self.cell_areas[own] + self.cell_areas[nei])
+        # Distance-weighted cell volume/area interpolation
+        vol_f  = (1.0 - self._gx_int) * self.cell_areas[own] + self._gx_int * self.cell_areas[nei]
         D_f    = vol_f / a_P_f
 
         phi_star += self.rho * D_f * (dp_interp - dp_actual) * magSf_int
@@ -520,18 +506,21 @@ class Solver:
         own     = self._own_i
         nei     = self._nei_i
 
-        U_interp = 0.5 * (self.U[own] + self.U[nei])
+        U_interp = (1.0 - self._gx_int)[:, None] * self.U[own] + self._gx_int[:, None] * self.U[nei]
         phi_star = self.rho * np.einsum('fj,fj->f', U_interp, self._Sf_int)
 
         if a_P_u is not None:
-            a_P_f      = np.maximum(0.25 * (a_P_u[own] + a_P_u[nei] +
-                                             a_P_v[own] + a_P_v[nei]), 1e-10)
-            gP_f       = 0.5 * (grad_P[own] + grad_P[nei])
+            a_P_own = 0.5 * (a_P_u[own] + a_P_v[own])
+            a_P_nei = 0.5 * (a_P_u[nei] + a_P_v[nei])
+            a_P_f = np.maximum((1.0 - self._gx_int) * a_P_own + self._gx_int * a_P_nei, 1e-10)
+            
+            gP_f       = (1.0 - self._gx_int)[:, None] * grad_P[own] + self._gx_int[:, None] * grad_P[nei]
+            vol_f      = (1.0 - self._gx_int) * self.cell_areas[own] + self._gx_int * self.cell_areas[nei]
+            
+            dp_actual  = (self.P[nei] - self.P[own]) / self.magDf[f_int]
             magSf_int  = self.magSf[f_int]
             n_f        = self._Sf_int / magSf_int[:, None]
             dp_interp  = np.einsum('fj,fj->f', gP_f, n_f)
-            dp_actual  = (self.P[nei] - self.P[own]) / self.magDf[f_int]
-            vol_f      = 0.5 * (self.cell_areas[own] + self.cell_areas[nei])
             D_f        = vol_f / a_P_f
             self.phi[f_int] = (phi_star
                                + self.rho * D_f * (dp_interp - dp_actual) * magSf_int)
@@ -559,10 +548,6 @@ class Solver:
         single pass.  A is identical for u and v — same convective flux F,
         same diffusion D, same boundary contributions — so we build it once
         and return two RHS vectors.
-
-        This halves the matrix assembly cost and, crucially, means the Jacobi
-        preconditioner (just diag(A)) is computed once and shared for both
-        the u-solve and the v-solve.
         """
         f_int   = self.internal_faces
         own_i   = self._own_i;  nei_i   = self._nei_i
@@ -588,7 +573,7 @@ class Solver:
 
         # Build p_face once; used for both axes
         p_face = np.empty(self.Nf)
-        p_face[f_int]             = 0.5 * (self.P[own_i] + self.P[nei_i])
+        p_face[f_int]             = (1.0 - self._gx_int) * self.P[own_i] + self._gx_int * self.P[nei_i]
         p_face[self.inlet_faces]  = self.P[own_in]
         p_face[self.outlet_faces] = self.outlet_pressure
         p_face[self.wall_faces]   = self.P[own_w]
@@ -733,7 +718,7 @@ class Solver:
 
         own = self._grad_own
         nei = self._grad_nei
-        P_f = 0.5 * (self.P[own] + self.P[nei])
+        P_f = (1.0 - self._gx_int) * self.P[own] + self._gx_int * self.P[nei]
 
         contrib = P_f[:, None] * self._Sf_int       # (Nf_int, 2)
         for i in range(2):
