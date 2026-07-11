@@ -83,6 +83,7 @@ Progress is printed to the console every 10 iterations.
 - **Multi-loop support**: Automatically detects outer boundary and internal holes via per-loop orientation analysis
 - **Conformal hole meshing**: Triangle vertices from all loop layers feed into the triangulation, ensuring watertight connectivity between prisms and interior cells
 - **Robust triangle filter**: Shapely polygon-intersection test removes any triangle that crosses a hole or outer boundary
+- **Refinement zones**: Draw rectangular regions in the PHYSICS stage to locally refine the interior mesh. Each zone has a refinement factor `f`; the resulting Steiner point spacing inside the zone is `r / f` (where `r` is the global "Mesh size" parameter). The UI shows the resulting mesh size (`r / f`) next to each zone. Zones support graded transitions (smoothstep blending over a buffer zone) to avoid sudden cell-size jumps that cause numerical artefacts. Overlapping zones are handled correctly via a unified Poisson-disk pass with per-zone centroid seeding.
 - Numba-accelerated circumcircle checks
 
 ### Solver

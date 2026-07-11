@@ -123,11 +123,13 @@ Returns a `Point`. The returned Point may be a reference to an *existing* endpoi
 | `growth_factor` | 1.1 | Layer thickness multiplier |
 | `thickness` | 1.0 | First layer thickness (world units) |
 | `boundary_spacing` | 6.0 | Arc length between boundary points (world units) |
-| `r` | 4.0 | Steiner point minimum separation (world units) |
+ | `r` | 4.0 | Steiner point minimum separation (world units) |
 | `inlet_velocity` | 1 | m/s (SI, not world units) |
 | `outlet_pressure` | 0 | Pa (SI) |
 | `density` | 1.2 | kg/m³ (SI) |
 | `viscosity` | 0.002 | Pa·s (SI) |
+
+**Refinement zones:** `refinement_zones` is a list of dicts `{ 'rect': (x1, y1, x2, y2), 'factor': float }`. Each zone is a rectangle drawn by the user (click-drag on canvas). The `factor` divides the global `r` to get the local Steiner spacing: `local_r = r / factor`. The UI shows the resulting mesh size (`r / factor`) next to each zone. Zones are converted to `(shapely_polygon, factor)` tuples via `_get_refinement_polygons()` and passed to the Mesher.
 
 **BC assignment:** Clicking a line (via `handle_selection`) opens a per-line ImGui window. The `boundary_types` list order matters — index maps to the combo box index AND to the `bc_map` in Mesher.
 
@@ -153,9 +155,10 @@ The most complex module. Four main phases:
 
 #### Phase 3: Steiner Points (`create_steiner_points`)
 - Poisson-disk sampling using Bridson's algorithm with a spatial grid.
-- Uses Shapely for the `safe_zone` (polygon buffered inward by `r * 0.8`).
-- Grid cell size `w = r / sqrt(2)`.
-- Hard cap at 500,000 grid cells — if triggered, `self.points` is empty.
+- Uses Shapely for the `safe_zone` (polygon buffered inward by `min_r * 0.8`, where `min_r` is the smallest spacing across all refinement zones — this lets Steiner points sit closer to prismatic layers when refinement is active).
+- Grid cell size `w = min_r / sqrt(2)` (sized for the densest zone).
+- **Refinement zones**: If `self.refinement_zones` is non-empty, a single unified Poisson-disk pass fills all zones + background simultaneously. Each zone gets a guaranteed seed at its centroid (so overlapping/disconnected zone arms are all populated). The spacing at each candidate is determined by `_get_local_r()` which uses signed-distance blending (smoothstep over a `5 * r` buffer) to transition smoothly from `r/factor` inside a zone to `r` outside — avoiding sudden cell-size jumps that cause solver artefacts.
+- Hard cap at 2000×2000 grid cells — if triggered, `w` is rescaled to fit.
 
 #### Phase 4: Triangulation & Filter
 - Calls `Bowyer_watson(all_interior_pts)`.

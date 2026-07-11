@@ -19,12 +19,15 @@ from imgui.integrations.pygame import PygameRenderer
 
 class Mesher:
     def __init__(self, screen, lines, n_layers, growth_factor, thickness, spacing, r, RENDERER,
-                 unit_to_meters=0.001):
+                 unit_to_meters=0.001, refinement_zones=None):
         """
         unit_to_meters: conversion factor from world-units (CAD coords) to SI metres.
                         0.001 for mm (default), 0.01 for cm, 1.0 for m.
         All geometry parameters (thickness, spacing, r) must be in the same world-unit.
         The solver receives everything converted to metres.
+        
+        refinement_zones: list of (shapely_polygon, factor) tuples. Inside each polygon,
+                          the Steiner point separation is r / factor, giving finer mesh.
         """
         self.lines = lines
         self.points = None
@@ -45,6 +48,9 @@ class Mesher:
 
         # Mesh generation
         self.r = r
+
+        # Refinement zones: list of (shapely_polygon, factor)
+        self.refinement_zones = refinement_zones if refinement_zones is not None else []
 
         self.renderer = RENDERER
         self.finished = False
@@ -243,6 +249,55 @@ class Mesher:
                 np.vstack(all_thicknesses),
                 np.concatenate(all_bc_tags))
 
+    def _get_local_r(self, base_r, candidate):
+        """Return the effective Steiner spacing at a given candidate point.
+        
+        Uses signed-distance blending: inside refinement zones the spacing
+        is base_r / factor, but it transitions smoothly to base_r over a
+        buffer zone around each polygon boundary.
+        
+        This avoids a sudden step-change in cell size at zone boundaries,
+        which causes numerical "resistance" artefacts in the solver.
+        """
+        p_shapely = ShapelyPoint(candidate)
+        # buffer_width controls how many world-units the transition spans.
+        # 2 * base_r gives ~2 cell widths of graded transition.
+        buffer_width = 5.0 * base_r
+        
+        # Find the closest zone and its signed distance
+        min_signed_dist = None
+        best_factor = None
+        
+        for poly, factor in self.refinement_zones:
+            safe_factor = max(factor, 1.1)
+            if poly.contains(p_shapely):
+                # Inside: signed distance is negative, measured to the exterior
+                dist = poly.exterior.distance(p_shapely)
+                signed_dist = -dist
+            else:
+                # Outside: signed distance is positive
+                dist = poly.distance(p_shapely)
+                signed_dist = dist
+            
+            if min_signed_dist is None or signed_dist < min_signed_dist:
+                min_signed_dist = signed_dist
+                best_factor = safe_factor
+        
+        if best_factor is None or min_signed_dist is None:
+            return base_r
+        
+        # Blend: when signed_dist is -buffer_width → fully refined
+        #        when signed_dist is 0 (boundary) → half refined
+        #        when signed_dist is +buffer_width → fully background
+        t = (min_signed_dist + buffer_width) / (2.0 * buffer_width)
+        t = max(0.0, min(1.0, t))  # clamp to [0, 1]
+        # Smoothstep for C1 continuity
+        smooth_t = t * t * (3.0 - 2.0 * t)
+        
+        refined = base_r / best_factor
+        blended = refined * (1.0 - smooth_t) + base_r * smooth_t
+        return blended
+
     def create_steiner_points(self, inner_rings, r=4.0, k=30):
         """Sample interior Steiner points for a domain that may contain holes.
 
@@ -250,6 +305,12 @@ class Mesher:
         `inner_rings[self.outer_idx]` is the outer boundary and the rest are
         holes.  A Shapely polygon-with-holes is built so the Poisson-disk
         rejection test automatically avoids the hole interiors.
+
+        If refinement_zones are defined, the Steiner spacing inside each zone
+        is r / factor.  A single Poisson-disk pass fills all zones + background
+        simultaneously, with spatially-varying spacing.  Each zone is guaranteed
+        a seed at its centroid so overlapping or disconnected zone arms are all
+        populated.
         """
         if not inner_rings or len(inner_rings[self.outer_idx]) < 3:
             raise ValueError("Boundary polygon not defined properly.")
@@ -259,47 +320,101 @@ class Mesher:
                       for i, ring in enumerate(inner_rings)
                       if i != self.outer_idx and len(ring) >= 3]
         full_poly = ShapelyPoly(outer_coords, hole_coords)
-        safe_zone = full_poly.buffer(-r * 0.8)
+
+        # Determine the effective minimum r across all refinement zones so
+        # the grid cell size is fine enough for the densest zone.
+        min_r = r
+        for poly, factor in self.refinement_zones:
+            local_r = r / max(factor, 1.1)
+            if local_r < min_r:
+                min_r = local_r
+
+        safe_zone = full_poly.buffer(-min_r * 0.8)
         xmin, ymin, xmax, ymax = full_poly.bounds
 
-        w = r / np.sqrt(2)
+        w = min_r / np.sqrt(2)
         cols = int(np.ceil((xmax - xmin) / w))
         rows = int(np.ceil((ymax - ymin) / w))
 
+        # Clamp to prevent absurdly large grids from tiny refinement factors
+        MAX_GRID = 2000
+        if cols > MAX_GRID or rows > MAX_GRID:
+            scale = min(MAX_GRID / cols, MAX_GRID / rows)
+            cols = max(1, int(cols * scale))
+            rows = max(1, int(rows * scale))
+            w = (xmax - xmin) / cols if cols > 1 else w
 
-        grid = np.full((cols, rows), None, dtype=object)
-        points = []
-        active = []
-
-        # Inline constants so the hot loop avoids repeated attribute lookups
         _w_inv = 1.0 / w
 
         def get_grid_coords(p):
             gx = int((p[0] - xmin) * _w_inv)
             gy = int((p[1] - ymin) * _w_inv)
-            # Clamp to valid grid indices: a candidate landing exactly on
-            # xmax/ymax yields gx == cols / gy == rows -> IndexError otherwise.
             gx = 0 if gx < 0 else (cols - 1 if gx >= cols else gx)
             gy = 0 if gy < 0 else (rows - 1 if gy >= rows else gy)
             return gx, gy
 
-        found_start = False
+        grid = np.full((cols, rows), None, dtype=object)
+        all_points = []
+        active = []
+
+        # --- Seed points ---
+        # 1. Background: one random point in the safe zone
+        found_bg = False
         attempts = 0
-        while not found_start and attempts < 1000:
+        while not found_bg and attempts < 1000:
             attempts += 1
             p0 = np.random.uniform([xmin, ymin], [xmax, ymax])
             if safe_zone.contains(ShapelyPoint(p0)):
-                points.append(p0)
+                all_points.append(p0)
                 active.append(p0)
                 gx, gy = get_grid_coords(p0)
                 grid[gx, gy] = p0
-                found_start = True
+                found_bg = True
 
-        if not found_start:
-            print("Could not find a starting point inside the polygon!")
-            self.points = np.array([])
-            return
+        # 2. Each refinement zone: one seed at its centroid (guaranteed).
+        #    If the centroid falls outside the safe zone, try random fallback.
+        for poly, factor in self.refinement_zones:
+            centroid = np.array([poly.centroid.x, poly.centroid.y])
+            seed = centroid
+            if not safe_zone.contains(ShapelyPoint(seed)):
+                # Fallback: random point in the intersection
+                found_zone = False
+                for attempt in range(100):
+                    p_rnd = np.random.uniform([xmin, ymin], [xmax, ymax])
+                    if poly.contains(ShapelyPoint(p_rnd)) and safe_zone.contains(ShapelyPoint(p_rnd)):
+                        seed = p_rnd
+                        found_zone = True
+                        break
+                if not found_zone:
+                    continue
+            # Check distance to existing points via grid
+            gx, gy = get_grid_coords(seed)
+            # Clamp grid coords
+            gx = 0 if gx < 0 else (cols - 1 if gx >= cols else gx)
+            gy = 0 if gy < 0 else (rows - 1 if gy >= rows else gy)
+            local_r = self._get_local_r(r, seed)
+            r_sq = local_r * local_r
+            is_far = True
+            i0 = max(gx - 2, 0)
+            i1 = min(gx + 3, cols)
+            j0 = max(gy - 2, 0)
+            j1 = min(gy + 3, rows)
+            for i in range(i0, i1):
+                for j in range(j0, j1):
+                    neighbor = grid[i, j]
+                    if neighbor is not None:
+                        diff = seed - neighbor
+                        if diff[0]*diff[0] + diff[1]*diff[1] < r_sq:
+                            is_far = False
+                            break
+                if not is_far:
+                    break
+            if is_far:
+                all_points.append(seed)
+                active.append(seed)
+                grid[gx, gy] = seed
 
+        # --- Unified Poisson-disk pass with spatially-varying radius ---
         while active:
             idx = np.random.randint(len(active))
             base_point = active[idx]
@@ -307,16 +422,18 @@ class Mesher:
 
             for _ in range(k):
                 angle = np.random.uniform(0, 2 * np.pi)
-                rad = np.random.uniform(r, 2 * r)
+                rad = np.random.uniform(r, 2 * r)  # use global r for step distance
                 candidate = base_point + rad * np.array([np.cos(angle), np.sin(angle)])
 
                 if not (xmin <= candidate[0] <= xmax and ymin <= candidate[1] <= ymax):
                     continue
 
+                # Determine local spacing for this candidate
+                local_r_cand = self._get_local_r(r, candidate)
+                local_r_sq = local_r_cand * local_r_cand
+
                 gx, gy = get_grid_coords(candidate)
                 is_far_enough = True
-                r_sq = r * r
-                # Ternary clamps avoid 4 Python builtin calls per candidate
                 i0 = gx - 2 if gx > 2 else 0
                 i1 = gx + 3 if gx + 3 < cols else cols
                 j0 = gy - 2 if gy > 2 else 0
@@ -326,12 +443,11 @@ class Mesher:
                         neighbor = grid[i, j]
                         if neighbor is not None:
                             diff = candidate - neighbor
-                            if diff[0]*diff[0] + diff[1]*diff[1] < r_sq:
+                            if diff[0]*diff[0] + diff[1]*diff[1] < local_r_sq:
                                 is_far_enough = False
                                 break
                     if not is_far_enough:
                         break
-
 
                 if not is_far_enough:
                     continue
@@ -339,7 +455,7 @@ class Mesher:
                 if not safe_zone.contains(ShapelyPoint(candidate)):
                     continue
 
-                points.append(candidate)
+                all_points.append(candidate)
                 active.append(candidate)
                 grid[gx, gy] = candidate
                 found = True
@@ -348,7 +464,7 @@ class Mesher:
             if not found:
                 active.pop(idx)
 
-        self.points = np.array(points)
+        self.points = np.array(all_points)
 
     def build_polygon(self):
         """Group the (possibly disconnected) CAD lines into separate closed

@@ -90,12 +90,10 @@ def run_app():
                     editor.handle_event(event, camera)
             
             # Physics editor launches after the editor. It is responsible for controlling boundary conditions,
-            # meshing and solving parameters. 
+            # meshing and solving parameters (and now also refinement zone drawing).
             elif current_state == "PHYSICS":
                 physicseditor.renderer.process_event(event)
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if not imgui.get_io().want_capture_mouse:
-                        physicseditor.handle_selection(camera.screen_to_world(event.pos),camera)
+                physicseditor.handle_event(event, camera)
             #visualizer is a simple visual way to check results and residuals
             elif current_state == "VISUALIZER":
                 visualizer.renderer.process_event(event)
@@ -111,11 +109,14 @@ def run_app():
             # --- Mesh / Remesh ---
             if physicseditor.mesh_requested:
                 physicseditor.mesh_requested = False
+                # Convert refinement zone dicts to (shapely_polygon, factor) tuples
+                refinement_zones = physicseditor._get_refinement_polygons()
                 mesher = Mesher(
                     screen, physicseditor.lines, physicseditor.n_layers,
                     physicseditor.growth_factor, physicseditor.thickness,
                     physicseditor.boundary_spacing, physicseditor.r, renderer,
-                    unit_to_meters=physicseditor.unit_to_meters
+                    unit_to_meters=physicseditor.unit_to_meters,
+                    refinement_zones=refinement_zones
                 )
                 mesher.mesh()
 

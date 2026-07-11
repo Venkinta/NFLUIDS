@@ -1,7 +1,12 @@
+import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
 from .line import Line
+from .point import Point
 import math
+import numpy as np
+from shapely.geometry import Polygon as ShapelyPoly
+from shapely.geometry import Point as ShapelyPoint
 
 # Conversion factors to SI (metres)
 _UNIT_FACTORS = {"mm": 0.001, "cm": 0.01, "m": 1.0}
@@ -45,6 +50,14 @@ class PhysicsEditor:
         # --- Mesh Generation (in world units) ---
         self.r = 4.0
 
+        # --- Refinement Zones ---
+        # Each zone: { 'rect': (x1, y1, x2, y2), 'factor': float }
+        self.refinement_zones = []
+        self._drawing_refinement = False  # True while user is dragging a new rect
+        self._refine_start = None         # world-coord corner of current drag
+        self._refine_current = None       # world-coord opposite corner
+        self._refine_factor = 2.0         # default refinement factor for new zones
+
         # --- Boundary Conditions (SI) ---
         self.inlet_velocity = 1.0
         self.outlet_pressure = 0.0
@@ -65,6 +78,19 @@ class PhysicsEditor:
         return math.hypot(dx, dy)
 
     # ------------------------------------------------------------------
+    def _get_refinement_polygons(self):
+        """Return a list of (shapely_polygon, factor) for all refinement zones."""
+        result = []
+        for zone in self.refinement_zones:
+            x1, y1, x2, y2 = zone['rect']
+            # Normalise so x1 <= x2, y1 <= y2
+            rx1, rx2 = min(x1, x2), max(x1, x2)
+            ry1, ry2 = min(y1, y2), max(y1, y2)
+            poly = ShapelyPoly([(rx1, ry1), (rx2, ry1), (rx2, ry2), (rx1, ry2)])
+            result.append((poly, zone['factor']))
+        return result
+
+    # ------------------------------------------------------------------
     def draw(self, screen, camera, vbos=None):
         imgui.new_frame()
 
@@ -78,6 +104,9 @@ class PhysicsEditor:
                 camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
             if 'loaded' in vbos:
                 camera.draw_vbo(vbos['loaded'][0], vbos['loaded'][1], color=(200, 200, 200))
+
+        # --- Draw refinement zone overlays ---
+        self._draw_refinement_zones(screen, camera)
 
         u = self._unit_names[self._unit_idx]
 
@@ -164,6 +193,52 @@ class PhysicsEditor:
         if opened2:
             _, self.r = imgui.input_float(f"Mesh size (min sep.) [{u}]", self.r, step=1.0, step_fast=10.0)
 
+        # --- Refinement Zones Section ---
+        imgui.separator()
+        opened3, _ = imgui.collapsing_header("Refinement Zones", flags=imgui.TREE_NODE_DEFAULT_OPEN)
+        if opened3:
+            # Draw the list of existing zones
+            to_remove = None
+            for i, zone in enumerate(self.refinement_zones):
+                x1, y1, x2, y2 = zone['rect']
+                rx1, rx2 = min(x1, x2), max(x1, x2)
+                ry1, ry2 = min(y1, y2), max(y1, y2)
+                w = rx2 - rx1
+                h = ry2 - ry1
+                # Delete button on the left, always visible
+                imgui.push_style_color(imgui.COLOR_BUTTON, 0.8, 0.2, 0.2, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 1.0, 0.3, 0.3, 1.0)
+                if imgui.button(f" X ##del_{i}"):
+                    to_remove = i
+                imgui.pop_style_color(2)
+                imgui.same_line()
+                imgui.text(f"Zone {i+1}: ({rx1:.1f}, {ry1:.1f}) → ({rx2:.1f}, {ry2:.1f})  [{w:.1f}×{h:.1f} {u}]")
+                imgui.same_line()
+                _, zone['factor'] = imgui.input_float(f"##factor_{i}", zone['factor'], step=0.5, step_fast=1.0)
+                zone['factor'] = max(1.1, zone['factor'])
+                imgui.same_line()
+                imgui.text(f"×{zone['factor']:.1f}")
+                imgui.same_line()
+                imgui.text_colored(f"→ {self.r / zone['factor']:.2f} {u}", 0.6, 1.0, 0.6, 1.0)
+            if to_remove is not None:
+                self.refinement_zones.pop(to_remove)
+
+            # "Add Refinement Zone" button / drawing mode toggle
+            if not self._drawing_refinement:
+                if imgui.button("Add Refinement Zone"):
+                    self._drawing_refinement = True
+                    self._refine_start = None
+                    self._refine_current = None
+            else:
+                imgui.text_colored("Click & drag on canvas to draw a refinement rectangle", 0.2, 1.0, 0.2, 1.0)
+                if imgui.button("Cancel"):
+                    self._drawing_refinement = False
+                    self._refine_start = None
+                    self._refine_current = None
+
+            _, self._refine_factor = imgui.input_float("Refinement factor", self._refine_factor, step=0.5, step_fast=1.0)
+            self._refine_factor = max(1.1, self._refine_factor)
+
         imgui.separator()
         mesh_label = "Remesh" if self.has_mesh else "Mesh"
         if imgui.button(mesh_label):
@@ -181,11 +256,6 @@ class PhysicsEditor:
         imgui.end()
 
         # ---- Per-Line Selection Popup ----
-        # BUG FIX: Previously set_next_window_position and set_next_window_size were called
-        # every frame with no condition, which (a) pinned the window so it could not be
-        # moved, and (b) caused it to overlap and hide behind the main settings window.
-        # Fix: FIRST_USE_EVER means imgui only applies the hint once (on first open).
-        # WINDOW_ALWAYS_AUTO_RESIZE replaces the fixed height so content is never clipped.
         if self.selected_line:
             idx = self.lines.index(self.selected_line) + 1
             length = self._line_length(self.selected_line)
@@ -220,10 +290,104 @@ class PhysicsEditor:
         self.renderer.render(imgui.get_draw_data())
 
     # ------------------------------------------------------------------
-    def handle_selection(self, pos,camera):
+    def _draw_refinement_zones(self, screen, camera):
+        """Draw all refinement zone rectangles as semi-transparent overlays."""
+        # Draw existing zones
+        for zone in self.refinement_zones:
+            x1, y1, x2, y2 = zone['rect']
+            rx1, rx2 = min(x1, x2), max(x1, x2)
+            ry1, ry2 = min(y1, y2), max(y1, y2)
+            # Semi-transparent fill
+            p1 = camera.to_screen((rx1, ry1))
+            p2 = camera.to_screen((rx2, ry2))
+            # Draw filled rectangle using OpenGL
+            gl_r, gl_g, gl_b = 0.2, 0.6, 1.0  # light blue
+            from OpenGL.GL import glBegin, glEnd, glColor4f, glVertex2f, GL_QUADS, GL_LINE_LOOP, glLineWidth
+            glColor4f(gl_r, gl_g, gl_b, 0.15)
+            glBegin(GL_QUADS)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
+            # Outline
+            glColor4f(gl_r, gl_g, gl_b, 0.6)
+            glLineWidth(2)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
+
+        # Draw the in-progress rectangle while dragging
+        if self._drawing_refinement and self._refine_start is not None and self._refine_current is not None:
+            x1, y1 = self._refine_start.x, self._refine_start.y
+            x2, y2 = self._refine_current.x, self._refine_current.y
+            rx1, rx2 = min(x1, x2), max(x1, x2)
+            ry1, ry2 = min(y1, y2), max(y1, y2)
+            p1 = camera.to_screen((rx1, ry1))
+            p2 = camera.to_screen((rx2, ry2))
+            from OpenGL.GL import glBegin, glEnd, glColor4f, glVertex2f, GL_QUADS, GL_LINE_LOOP, glLineWidth
+            glColor4f(0.2, 1.0, 0.2, 0.12)
+            glBegin(GL_QUADS)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
+            glColor4f(0.2, 1.0, 0.2, 0.8)
+            glLineWidth(2)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
+
+    # ------------------------------------------------------------------
+    def handle_event(self, event, camera):
+        """Handle events for the physics editor, including refinement zone drawing."""
+        if self._drawing_refinement:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Start dragging a new refinement rectangle
+                world_pos = camera.screen_to_world(event.pos)
+                self._refine_start = world_pos
+                self._refine_current = world_pos
+            elif event.type == pygame.MOUSEMOTION and self._refine_start is not None:
+                world_pos = camera.screen_to_world(event.pos)
+                self._refine_current = world_pos
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self._refine_start is not None:
+                # Finish the rectangle
+                world_pos = camera.screen_to_world(event.pos)
+                x1, y1 = self._refine_start.x, self._refine_start.y
+                x2, y2 = world_pos.x, world_pos.y
+                # Only add if the rectangle has non-zero area
+                if abs(x2 - x1) > 0.01 and abs(y2 - y1) > 0.01:
+                    self.refinement_zones.append({
+                        'rect': (x1, y1, x2, y2),
+                        'factor': self._refine_factor,
+                    })
+                    print(f"[Refinement] Added zone: ({x1:.2f},{y1:.2f})→({x2:.2f},{y2:.2f}) ×{self._refine_factor:.1f}")
+                self._drawing_refinement = False
+                self._refine_start = None
+                self._refine_current = None
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                # Cancel refinement drawing
+                self._drawing_refinement = False
+                self._refine_start = None
+                self._refine_current = None
+        else:
+            # Normal line selection handling
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if not imgui.get_io().want_capture_mouse:
+                    self.handle_selection(camera.screen_to_world(event.pos), camera)
+
+    # ------------------------------------------------------------------
+    def handle_selection(self, pos, camera):
         """Called on left-click (world coords). Clicking same line deselects it."""
         for line in self.lines:
-            if line.is_mouse_over(pos,camera):
+            if line.is_mouse_over(pos, camera):
                 if line is self.selected_line:
                     self.selected_line = None  # toggle off
                 else:
