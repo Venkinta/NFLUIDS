@@ -262,7 +262,7 @@ class Mesher:
         p_shapely = ShapelyPoint(candidate)
         # buffer_width controls how many world-units the transition spans.
         # 2 * base_r gives ~2 cell widths of graded transition.
-        buffer_width = 5.0 * base_r
+        buffer_width = 10.0 * base_r
         
         # Find the closest zone and its signed distance
         min_signed_dist = None
