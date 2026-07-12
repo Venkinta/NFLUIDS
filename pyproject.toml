@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.4.0"
+version = "1.4.1"
 description = "Interactive 2D CFD Solver with CAD Frontend — Symmetry BC, per-BC boundary spacing"
 readme = "README.md"
 license = {text = "MIT"}

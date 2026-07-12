@@ -172,7 +172,7 @@ def run_app():
                 # Restore per-BC spacing if it was saved (new files); otherwise
                 # initialise from the global boundary_spacing.
                 if 'bc_spacing_map' in loaded:
-                    physicseditor._bc_spacing = dict(loaded['bc_spacing_map'])
+                    physicseditor._bc_spacing = loaded['bc_spacing_map'].item()
                     physicseditor._spacing_linked = False
                     # Check if all values are identical → re-link
                     vals = list(physicseditor._bc_spacing.values())
