@@ -47,6 +47,18 @@ class PhysicsEditor:
         self.thickness = 1.0
         self.boundary_spacing = 6.0
 
+        # --- Per-BC boundary spacing (world units) ---
+        # Initialised to the global default.  When _spacing_linked is True,
+        # changing the global boundary_spacing updates all of these; when
+        # unlinked, each BC type can have its own value.
+        self._bc_spacing = {
+            "Wall":            self.boundary_spacing,
+            "Symmetry":        self.boundary_spacing,
+            "Velocity Inlet":  self.boundary_spacing,
+            "Pressure Outlet": self.boundary_spacing,
+        }
+        self._spacing_linked = True
+
         # --- Mesh Generation (in world units) ---
         self.r = 4.0
 
@@ -64,7 +76,7 @@ class PhysicsEditor:
 
         # --- Line Selection State ---
         self.selected_line = None
-        self.boundary_types = ["Wall", "Velocity Inlet", "Pressure Outlet"]
+        self.boundary_types = ["Wall", "Symmetry", "Velocity Inlet", "Pressure Outlet"]
         self.current_line_idx = 0
         
         # --- Re calculator part ---
@@ -187,7 +199,29 @@ class PhysicsEditor:
             _, self.n_layers         = imgui.input_int(  "N. Boundary layers",           self.n_layers,         step=1,   step_fast=1)
             _, self.growth_factor    = imgui.input_float("Growth factor",                 self.growth_factor,    step=0.05, step_fast=1.0)
             _, self.thickness        = imgui.input_float(f"First layer thickness [{u}]",  self.thickness,        step=0.25, step_fast=5.0)
-            _, self.boundary_spacing = imgui.input_float(f"Boundary cell spacing [{u}]",  self.boundary_spacing, step=0.5, step_fast=10.0)
+
+            # --- Per-BC boundary cell spacing ---
+            imgui.separator()
+            _, self._spacing_linked = imgui.checkbox("Linked spacing (all BCs)", self._spacing_linked)
+            if self._spacing_linked:
+                changed, self.boundary_spacing = imgui.input_float(
+                    f"Boundary cell spacing [{u}]", self.boundary_spacing,
+                    step=0.5, step_fast=10.0)
+                if changed:
+                    # Propagate global value to all BC types
+                    for k in self._bc_spacing:
+                        self._bc_spacing[k] = self.boundary_spacing
+            else:
+                # Show individual per-BC spacing fields
+                for bc_type in sorted(self._bc_spacing.keys()):
+                    label = f"{bc_type} spacing [{u}]"
+                    changed, val = imgui.input_float(label, self._bc_spacing[bc_type],
+                                                     step=0.5, step_fast=10.0)
+                    if changed:
+                        self._bc_spacing[bc_type] = max(0.1, val)
+                if imgui.button("Reset all to global"):
+                    for k in self._bc_spacing:
+                        self._bc_spacing[k] = self.boundary_spacing
 
         opened2, _ = imgui.collapsing_header("Mesher settings")
         if opened2:

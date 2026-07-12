@@ -137,6 +137,7 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `constructor.py` | Numba JIT kernels and geometry helpers |
 | `snapengine.py` | Vertex and axis snapping |
 | `meshIO.py` | Save/Load mesh to/from compressed `.npz` files |
+| `test_holes.py` | End-to-end test for multi-loop meshing with holes |
 | `CODEBASE_REFERENCE.md` | Internal developer documentation |
 
 ## Known Limitations

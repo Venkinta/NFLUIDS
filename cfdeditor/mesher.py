@@ -19,7 +19,7 @@ from imgui.integrations.pygame import PygameRenderer
 
 class Mesher:
     def __init__(self, screen, lines, n_layers, growth_factor, thickness, spacing, r, RENDERER,
-                 unit_to_meters=0.001, refinement_zones=None):
+                 unit_to_meters=0.001, refinement_zones=None, bc_spacing_map=None):
         """
         unit_to_meters: conversion factor from world-units (CAD coords) to SI metres.
                         0.001 for mm (default), 0.01 for cm, 1.0 for m.
@@ -28,6 +28,9 @@ class Mesher:
         
         refinement_zones: list of (shapely_polygon, factor) tuples. Inside each polygon,
                           the Steiner point separation is r / factor, giving finer mesh.
+
+        bc_spacing_map: dict mapping boundary-type string to per-type boundary spacing
+                        (world units).  Falls back to `spacing` for any type not in the map.
         """
         self.lines = lines
         self.points = None
@@ -45,6 +48,9 @@ class Mesher:
         self.growth_factor = growth_factor
         self.thickness = thickness
         self.boundary_spacing = spacing
+
+        # Per-BC spacing (fall back to global spacing for missing keys)
+        self.bc_spacing_map = bc_spacing_map if bc_spacing_map is not None else {}
 
         # Mesh generation
         self.r = r
@@ -187,7 +193,7 @@ class Mesher:
         all_bc_tags = []
 
 
-        bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2}
+        bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2, "Symmetry": 3}
 
         num_l = len(ordered_lines)
 
@@ -215,7 +221,9 @@ class Mesher:
                 continue
 
 
-            n_points = max(1, int(np.floor(line_length / self.boundary_spacing)))
+            # Use per-BC spacing if available, otherwise fall back to global
+            spacing = self.bc_spacing_map.get(line.boundary_type, self.boundary_spacing)
+            n_points = max(1, int(np.floor(line_length / spacing)))
 
             segment_points = np.linspace(start, end, n_points, endpoint=False)
 
@@ -886,7 +894,8 @@ class Mesher:
             f"wall={np.sum(boundary_tags==0)}, "
             f"inlet={np.sum(boundary_tags==1)}, "
             f"outlet={np.sum(boundary_tags==2)}, "
-            f"internal={np.sum(boundary_tags==-1)})")
+            f"internal={np.sum(boundary_tags==-1)})"
+            f"symmetry={np.sum(boundary_tags==3)})")
 
         # ----------------------------------------------------------------
         # 5. UNIT CONVERSION  — world units → SI metres
@@ -939,7 +948,7 @@ class Mesher:
         #    conditions edited.  Each row: [ax, ay, bx, by, bc_type_idx]
         #    bc_type_idx: 0=Wall, 1=Velocity Inlet, 2=Pressure Outlet
         # ----------------------------------------------------------------
-        bc_map_rev = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2}
+        bc_map_rev = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Symmetry": 3}
         cad_lines = np.array([
             [line.a.x, line.a.y, line.b.x, line.b.y,
              bc_map_rev.get(line.boundary_type, 0)]
@@ -971,6 +980,7 @@ class Mesher:
             'growth_factor':     self.growth_factor,
             'thickness':         getattr(self, '_orig_thickness', self.thickness),
             'boundary_spacing':  self.boundary_spacing,
+            'bc_spacing_map':    self.bc_spacing_map,
             'r':                 self.r,
             'unit_to_meters':    self.unit_to_meters,
             # --- Refinement zones (ride along for save/load; solver ignores) ---

@@ -121,6 +121,7 @@ class Solver:
 
         #id's
         self.wall_faces     = np.where(self.boundary_tags == 0)[0]
+        self.symmetry_faces = np.where(self.boundary_tags == 3)[0]
         self.inlet_faces    = np.where(self.boundary_tags == 1)[0]
         self.outlet_faces   = np.where(self.boundary_tags == 2)[0]
         self.internal_faces = np.where(self.boundary_tags == -1)[0]
@@ -186,9 +187,13 @@ class Solver:
         # Boundary faces (ordered: inlet, outlet, wall — consistent throughout)
         self._f_bnd  = np.concatenate([self.inlet_faces,
                                         self.outlet_faces,
-                                        self.wall_faces])
+                                        self.wall_faces,
+                                        self.symmetry_faces])
         self._own_b  = self.owner[self._f_bnd] #grab owner id and Sf for each boundary face
         self._Sf_bnd = self.Sf[self._f_bnd]
+        
+        sym_set = set(self.symmetry_faces.tolist())
+        self._is_sym_bnd = np.array([f in sym_set for f in self._f_bnd], dtype=bool)
 
         outlet_set = set(self.outlet_faces.tolist())
         self._is_outlet_bnd = np.array(
@@ -200,9 +205,11 @@ class Solver:
         self._own_in  = self.owner[self.inlet_faces]
         self._own_w   = self.owner[self.wall_faces]
         self._own_out = self.owner[self.outlet_faces]
+        self._own_sym = self.owner[self.symmetry_faces]
         self._Sf_in   = self.Sf[self.inlet_faces]
         self._Sf_w    = self.Sf[self.wall_faces]
         self._Sf_out  = self.Sf[self.outlet_faces]
+        self._Sf_sym = self.Sf[self.symmetry_faces]
         self._all_owner = self.owner  # alias, no copy
 
         # --- NON-ORTHOGONAL GEOMETRIC DECOMPOSITION (Over-Relaxed Approach) ---
@@ -497,6 +504,10 @@ class Solver:
             self.rho * np.einsum('fj,j->f', self._Sf_in, self.inlet_velocity))
         # Wall – no penetration
         phi[self.wall_faces] = 0.0
+        
+        #Symmetry
+        phi[self.symmetry_faces] = 0.0
+        
         # Outlet – use the current (starred) velocity at the outlet cells
         phi[self.outlet_faces] = (
             self.rho * np.einsum('fj,fj->f',
@@ -544,12 +555,14 @@ class Solver:
         self.phi[self.wall_faces]  = 0.0
         self.phi[self.outlet_faces] = (
             self.rho * np.einsum('fj,fj->f', self.U[self._own_out], self._Sf_out))
+        self.phi[self.symmetry_faces] = 0.0
 
         mu = self.viscosity
         self.diff[f_int]                = mu * self.magSf[f_int]              / self.magDf[f_int]
         self.diff[self.inlet_faces]     = mu * self.magSf[self.inlet_faces]   / self.magDf[self.inlet_faces]
         self.diff[self.outlet_faces]    = 0.0
         self.diff[self.wall_faces]      = mu * self.magSf[self.wall_faces]    / self.magDf[self.wall_faces]
+        self.diff[self.symmetry_faces] = 0.0
 
     # ------------------------------------------------------------------
 
@@ -582,7 +595,8 @@ class Solver:
         p_face[self.inlet_faces]  = self.P[own_in]
         p_face[self.outlet_faces] = self.outlet_pressure
         p_face[self.wall_faces]   = self.P[own_w]
-
+        p_face[self.symmetry_faces] = self.P[self._own_sym]
+        
         b_x = np.zeros(self.Nc)
         b_y = np.zeros(self.Nc)
 
@@ -729,9 +743,11 @@ class Solver:
         P_f_b = self.P[self._own_b].copy()
         if is_correction:
             P_f_b[self._is_outlet_bnd] = 0.0
+            P_f_b[self._is_sym_bnd]    = self.P[self._own_b[self._is_sym_bnd]]  # already owner P, explicit for clarity
         else:
             P_f_b[self._is_outlet_bnd] = self.outlet_pressure
-
+            # symmetry: already self.P[owner], no change needed — it's the zero-gradient condition
+         
         contrib_b = P_f_b[:, None] * self._Sf_bnd   # (Nf_bnd, 2)
         for i in range(2):
             grad_P[:, i] += np.bincount(self._own_b,

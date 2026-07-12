@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.3.1"
-description = "Interactive 2D CFD Solver with CAD Frontend — Mesh load fixes, refinement zone persistence"
+version = "1.4.0"
+description = "Interactive 2D CFD Solver with CAD Frontend — Symmetry BC, per-BC boundary spacing"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/Venkinta/NFLUID"
+Repository = "https://github.com/Venkinta/NFLUIDS"
 
 [project.scripts]
 cfdeditor = "cfdeditor.__main__:run_app"

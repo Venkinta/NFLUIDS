@@ -116,7 +116,8 @@ def run_app():
                     physicseditor.growth_factor, physicseditor.thickness,
                     physicseditor.boundary_spacing, physicseditor.r, renderer,
                     unit_to_meters=physicseditor.unit_to_meters,
-                    refinement_zones=refinement_zones
+                    refinement_zones=refinement_zones,
+                    bc_spacing_map=physicseditor._bc_spacing
                 )
                 mesher.mesh()
 
@@ -143,7 +144,7 @@ def run_app():
 
                 # Reconstruct CAD lines from the saved dict so the user can
                 # edit boundary conditions and remesh.
-                bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet"]
+                bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet", "Symmetry"]
                 cad = loaded['cad_lines']
                 lines = []
                 for row in cad:
@@ -167,6 +168,20 @@ def run_app():
                     if abs(_unit_factors[name] - physicseditor.unit_to_meters) < 1e-12:
                         physicseditor._unit_idx = i
                         break
+
+                # Restore per-BC spacing if it was saved (new files); otherwise
+                # initialise from the global boundary_spacing.
+                if 'bc_spacing_map' in loaded:
+                    physicseditor._bc_spacing = dict(loaded['bc_spacing_map'])
+                    physicseditor._spacing_linked = False
+                    # Check if all values are identical → re-link
+                    vals = list(physicseditor._bc_spacing.values())
+                    if len(set(round(v, 9) for v in vals)) == 1:
+                        physicseditor._spacing_linked = True
+                else:
+                    for k in physicseditor._bc_spacing:
+                        physicseditor._bc_spacing[k] = physicseditor.boundary_spacing
+                    physicseditor._spacing_linked = True
 
                 # Restore refinement zones so they persist across save/load.
                 if 'refinement_zones' in loaded:
