@@ -13,6 +13,7 @@ import time
 import cProfile
 import pstats
 
+
 import imgui
 from imgui.integrations.pygame import PygameRenderer
 
@@ -259,205 +260,215 @@ class Mesher:
 
     def _get_local_r(self, base_r, candidate):
         """Return the effective Steiner spacing at a given candidate point.
-        
-        Uses signed-distance blending: inside refinement zones the spacing
-        is base_r / factor, but it transitions smoothly to base_r over a
-        buffer zone around each polygon boundary.
-        
-        The buffer zone width is controlled by each zone's `buffer_mult`
-        parameter (default 5.0), which multiplies the local refined spacing
-        to give the transition width in world units.
-        
-        This avoids a sudden step-change in cell size at zone boundaries,
-        which causes numerical "resistance" artefacts in the solver.
+    
+        Only called during the seed-placement phase (a handful of times).
+        The hot Poisson-disk loop uses radius_grid instead.
         """
         p_shapely = ShapelyPoint(candidate)
-        
-        # Find the closest zone and its signed distance
+    
         min_signed_dist = None
-        best_factor = None
+        best_factor     = None
         best_buffer_mult = 5.0
-        
+    
         for zone in self.refinement_zones:
-            # Unpack: zones are (poly, factor) or (poly, factor, buffer_mult)
             if len(zone) == 3:
                 poly, factor, buffer_mult = zone
             else:
                 poly, factor = zone
-                buffer_mult = 5.0
+                buffer_mult  = 5.0
             safe_factor = max(factor, 1.1)
+    
             if poly.contains(p_shapely):
-                # Inside: signed distance is negative, measured to the exterior
-                dist = poly.exterior.distance(p_shapely)
+                dist        = poly.exterior.distance(p_shapely)
                 signed_dist = -dist
             else:
-                # Outside: signed distance is positive
-                dist = poly.distance(p_shapely)
+                dist        = poly.distance(p_shapely)
                 signed_dist = dist
-            
+    
             if min_signed_dist is None or signed_dist < min_signed_dist:
-                min_signed_dist = signed_dist
-                best_factor = safe_factor
+                min_signed_dist  = signed_dist
+                best_factor      = safe_factor
                 best_buffer_mult = buffer_mult
-        
+    
         if best_factor is None or min_signed_dist is None:
             return base_r
-        
-        # buffer_width controls how many world-units the transition spans.
-        # Default was 10.0 * base_r; now per-zone via buffer_mult * (base_r / factor).
+    
         local_refined = base_r / best_factor
-        buffer_width = best_buffer_mult * local_refined
-        
-        # Blend: when signed_dist is -buffer_width → fully refined
-        #        when signed_dist is 0 (boundary) → half refined
-        #        when signed_dist is +buffer_width → fully background
-        t = (min_signed_dist + buffer_width) / (2.0 * buffer_width)
-        t = max(0.0, min(1.0, t))  # clamp to [0, 1]
-        # Smoothstep for C1 continuity
-        smooth_t = t * t * (3.0 - 2.0 * t)
-        
-        refined = base_r / best_factor
-        blended = refined * (1.0 - smooth_t) + base_r * smooth_t
-        return blended
-
+        buffer_width  = best_buffer_mult * local_refined
+        t             = (min_signed_dist + buffer_width) / (2.0 * buffer_width)
+        t             = max(0.0, min(1.0, t))
+        smooth_t      = t * t * (3.0 - 2.0 * t)
+    
+        return local_refined * (1.0 - smooth_t) + base_r * smooth_t
+    
     def create_steiner_points(self, inner_rings, r=4.0, k=30):
         """Sample interior Steiner points for a domain that may contain holes.
-
+    
         `inner_rings` is a list of Nx2 arrays, one per loop, where
         `inner_rings[self.outer_idx]` is the outer boundary and the rest are
         holes.  A Shapely polygon-with-holes is built so the Poisson-disk
         rejection test automatically avoids the hole interiors.
-
+    
         If refinement_zones are defined, the Steiner spacing inside each zone
         is r / factor.  A single Poisson-disk pass fills all zones + background
         simultaneously, with spatially-varying spacing.  Each zone is guaranteed
         a seed at its centroid so overlapping or disconnected zone arms are all
         populated.
+    
+        Performance: `inside_grid` and `radius_grid` are precomputed once over
+        the background grid before the Poisson-disk loop begins, replacing the
+        per-candidate Shapely calls that dominated runtime at large point counts.
         """
         if not inner_rings or len(inner_rings[self.outer_idx]) < 3:
             raise ValueError("Boundary polygon not defined properly.")
-
+    
         outer_coords = [tuple(p) for p in inner_rings[self.outer_idx]]
-        hole_coords = [[tuple(p) for p in ring]
-                      for i, ring in enumerate(inner_rings)
-                      if i != self.outer_idx and len(ring) >= 3]
+        hole_coords  = [[tuple(p) for p in ring]
+                        for i, ring in enumerate(inner_rings)
+                        if i != self.outer_idx and len(ring) >= 3]
         full_poly = ShapelyPoly(outer_coords, hole_coords)
-
-        # Determine the effective minimum r across all refinement zones so
-        # the grid cell size is fine enough for the densest zone.
+    
+        # Determine the effective minimum r across all refinement zones so the
+        # background grid is fine enough for the densest zone.
         min_r = r
         for zone in self.refinement_zones:
-            factor = zone[1]  # (poly, factor) or (poly, factor, buffer_mult)
+            factor  = zone[1]
             local_r = r / max(factor, 1.1)
             if local_r < min_r:
                 min_r = local_r
-
-        safe_zone = full_poly.buffer(-min_r * 0.8)
+    
+        safe_zone        = full_poly.buffer(-min_r * 0.8)
         xmin, ymin, xmax, ymax = full_poly.bounds
-
-        w = min_r / np.sqrt(2)
+    
+        w    = min_r / np.sqrt(2)
         cols = int(np.ceil((xmax - xmin) / w))
         rows = int(np.ceil((ymax - ymin) / w))
-
+    
         # Clamp to prevent absurdly large grids from tiny refinement factors
         MAX_GRID = 2000
         if cols > MAX_GRID or rows > MAX_GRID:
             scale = min(MAX_GRID / cols, MAX_GRID / rows)
-            cols = max(1, int(cols * scale))
-            rows = max(1, int(rows * scale))
-            w = (xmax - xmin) / cols if cols > 1 else w
-
+            cols  = max(1, int(cols * scale))
+            rows  = max(1, int(rows * scale))
+            w     = (xmax - xmin) / cols if cols > 1 else w
+    
         _w_inv = 1.0 / w
-
+    
         def get_grid_coords(p):
             gx = int((p[0] - xmin) * _w_inv)
             gy = int((p[1] - ymin) * _w_inv)
             gx = 0 if gx < 0 else (cols - 1 if gx >= cols else gx)
             gy = 0 if gy < 0 else (rows - 1 if gy >= rows else gy)
             return gx, gy
-
-        grid = np.full((cols, rows), None, dtype=object)
+    
+        # ------------------------------------------------------------------
+        # Precompute domain grids ONCE — replaces per-candidate Shapely calls
+        # ------------------------------------------------------------------
+        inside_grid, radius_grid = self._precompute_domain_grids(
+            safe_zone, xmin, ymin, w, cols, rows)
+    
+        # Poisson-disk occupancy grid (None = empty cell)
+        grid       = np.full((cols, rows), None, dtype=object)
         all_points = []
-        active = []
-
-        # --- Seed points ---
-        # 1. Background: one random point in the safe zone
-        found_bg = False
-        attempts = 0
+        active     = []
+    
+        # ------------------------------------------------------------------
+        # Seed points
+        # ------------------------------------------------------------------
+    
+        # 1. Background: one random point in the safe zone.
+        #    Uses inside_grid for the fast accept check.
+        found_bg  = False
+        attempts  = 0
         while not found_bg and attempts < 1000:
             attempts += 1
-            p0 = np.random.uniform([xmin, ymin], [xmax, ymax])
-            if safe_zone.contains(ShapelyPoint(p0)):
+            p0       = np.random.uniform([xmin, ymin], [xmax, ymax])
+            gx, gy   = get_grid_coords(p0)
+            if inside_grid[gx, gy]:
                 all_points.append(p0)
                 active.append(p0)
-                gx, gy = get_grid_coords(p0)
                 grid[gx, gy] = p0
-                found_bg = True
-
-        # 2. Each refinement zone: one seed at its centroid (guaranteed).
-        #    If the centroid falls outside the safe zone, try random fallback.
+                found_bg      = True
+    
+        # 2. Each refinement zone: one seed at its centroid.
+        #    _get_local_r is acceptable here — called only once per zone.
         for zone in self.refinement_zones:
-            poly = zone[0]
-            factor = zone[1]
+            poly     = zone[0]
             centroid = np.array([poly.centroid.x, poly.centroid.y])
-            seed = centroid
-            if not safe_zone.contains(ShapelyPoint(seed)):
-                # Fallback: random point in the intersection
+            seed     = centroid
+    
+            # If the centroid is outside the safe zone, try random fallback
+            c_gx, c_gy = get_grid_coords(seed)
+            if not inside_grid[c_gx, c_gy]:
                 found_zone = False
-                for attempt in range(100):
-                    p_rnd = np.random.uniform([xmin, ymin], [xmax, ymax])
-                    if poly.contains(ShapelyPoint(p_rnd)) and safe_zone.contains(ShapelyPoint(p_rnd)):
-                        seed = p_rnd
+                for _ in range(100):
+                    p_rnd    = np.random.uniform([xmin, ymin], [xmax, ymax])
+                    r_gx, r_gy = get_grid_coords(p_rnd)
+                    if poly.contains(ShapelyPoint(p_rnd)) and inside_grid[r_gx, r_gy]:
+                        seed       = p_rnd
                         found_zone = True
                         break
                 if not found_zone:
                     continue
-            # Check distance to existing points via grid
-            gx, gy = get_grid_coords(seed)
-            # Clamp grid coords
-            gx = 0 if gx < 0 else (cols - 1 if gx >= cols else gx)
-            gy = 0 if gy < 0 else (rows - 1 if gy >= rows else gy)
-            local_r = self._get_local_r(r, seed)
-            r_sq = local_r * local_r
-            is_far = True
-            i0 = max(gx - 2, 0)
-            i1 = min(gx + 3, cols)
-            j0 = max(gy - 2, 0)
-            j1 = min(gy + 3, rows)
+    
+            gx, gy   = get_grid_coords(seed)
+            local_r  = self._get_local_r(r, seed)   # fine here — only a few calls
+            r_sq     = local_r * local_r
+            is_far   = True
+            i0, i1   = max(gx - 2, 0), min(gx + 3, cols)
+            j0, j1   = max(gy - 2, 0), min(gy + 3, rows)
             for i in range(i0, i1):
                 for j in range(j0, j1):
-                    neighbor = grid[i, j]
-                    if neighbor is not None:
-                        diff = seed - neighbor
-                        if diff[0]*diff[0] + diff[1]*diff[1] < r_sq:
+                    nb = grid[i, j]
+                    if nb is not None:
+                        dx, dy = seed[0] - nb[0], seed[1] - nb[1]
+                        if dx*dx + dy*dy < r_sq:
                             is_far = False
                             break
                 if not is_far:
                     break
+    
             if is_far:
                 all_points.append(seed)
                 active.append(seed)
                 grid[gx, gy] = seed
-
-        # --- Unified Poisson-disk pass with spatially-varying radius ---
+    
+        # ------------------------------------------------------------------
+        # Main Poisson-disk pass — spatially-varying radius
+        #
+        # Hot-path changes vs original:
+        #   • safe_zone.contains(ShapelyPoint(candidate))  →  inside_grid[gx, gy]
+        #   • self._get_local_r(r, candidate)              →  radius_grid[gx, gy]
+        # Both are now O(1) numpy array lookups.
+        # ------------------------------------------------------------------
         while active:
-            idx = np.random.randint(len(active))
+            idx        = np.random.randint(len(active))
             base_point = active[idx]
-            found = False
-
+            found      = False
+    
             for _ in range(k):
-                angle = np.random.uniform(0, 2 * np.pi)
-                rad = np.random.uniform(r, 2 * r)  # use global r for step distance
-                candidate = base_point + rad * np.array([np.cos(angle), np.sin(angle)])
-
+                angle     = np.random.uniform(0, 2 * np.pi)
+                # Use local spacing at base_point for correct step distance
+                base_gx, base_gy = get_grid_coords(base_point)
+                local_r_base = radius_grid[base_gx, base_gy]
+                rad        = np.random.uniform(local_r_base, 2 * local_r_base)
+                candidate  = base_point + rad * np.array([np.cos(angle), np.sin(angle)])
+    
+                # Fast bounding-box reject
                 if not (xmin <= candidate[0] <= xmax and ymin <= candidate[1] <= ymax):
                     continue
-
-                # Determine local spacing for this candidate
-                local_r_cand = self._get_local_r(r, candidate)
-                local_r_sq = local_r_cand * local_r_cand
-
+    
                 gx, gy = get_grid_coords(candidate)
+    
+                # --- O(1) domain membership check (replaces Shapely contains) ---
+                if not inside_grid[gx, gy]:
+                    continue
+    
+                # --- O(1) local radius lookup (replaces _get_local_r) ---
+                local_r_cand = radius_grid[gx, gy]
+                local_r_sq   = local_r_cand * local_r_cand
+    
+                # Neighbour distance check in the occupancy grid
                 is_far_enough = True
                 i0 = gx - 2 if gx > 2 else 0
                 i1 = gx + 3 if gx + 3 < cols else cols
@@ -465,32 +476,30 @@ class Mesher:
                 j1 = gy + 3 if gy + 3 < rows else rows
                 for i in range(i0, i1):
                     for j in range(j0, j1):
-                        neighbor = grid[i, j]
-                        if neighbor is not None:
-                            diff = candidate - neighbor
-                            if diff[0]*diff[0] + diff[1]*diff[1] < local_r_sq:
+                        nb = grid[i, j]
+                        if nb is not None:
+                            dx, dy = candidate[0] - nb[0], candidate[1] - nb[1]
+                            if dx*dx + dy*dy < local_r_sq:
                                 is_far_enough = False
                                 break
                     if not is_far_enough:
                         break
-
+    
                 if not is_far_enough:
                     continue
-
-                if not safe_zone.contains(ShapelyPoint(candidate)):
-                    continue
-
+    
+                # Accept the candidate
                 all_points.append(candidate)
                 active.append(candidate)
                 grid[gx, gy] = candidate
-                found = True
+                found         = True
                 break
-
+    
             if not found:
                 active.pop(idx)
-
+    
         self.points = np.array(all_points)
-
+        
     def build_polygon(self):
         """Group the (possibly disconnected) CAD lines into separate closed
         loops.  Each loop is a list of Line objects ordered head-to-tail.
@@ -766,7 +775,6 @@ class Mesher:
         for t in to_remove:
             self.triangulation.remove_triangle(t)
 
-    
     def solver_data_pipeline(self):
         """
         Builds the mesh data dict for the Solver.
@@ -1011,7 +1019,103 @@ class Mesher:
             ], dtype=object),
         }
 
-
+    def _precompute_domain_grids(self, safe_zone, xmin, ymin, w, cols, rows):
+        """Precompute inside/radius lookup grids at the Poisson-disk grid resolution.
+    
+        Called once before the hot loop.  Pays the Shapely / per-point cost over
+        the fixed (cols × rows) grid cells instead of over every candidate point.
+    
+        Parameters
+        ----------
+        safe_zone : shapely Polygon (already eroded by buffer(-min_r * 0.8))
+        xmin, ymin : float  — domain bounding-box origin
+        w : float           — grid cell side length (= min_r / sqrt(2))
+        cols, rows : int    — grid dimensions
+    
+        Returns
+        -------
+        inside_grid : bool ndarray (cols, rows)
+            True where a candidate at that grid cell should be accepted (i.e. the
+            cell centre is inside safe_zone).
+        radius_grid : float64 ndarray (cols, rows)
+            Local Steiner spacing at each grid cell (= _get_local_r output).
+        """
+        # Build (cols*rows, 2) array of all grid-cell centres
+        gxs = np.arange(cols)
+        gys = np.arange(rows)
+        GX, GY = np.meshgrid(gxs, gys, indexing='ij')   # both (cols, rows)
+        cx = xmin + (GX + 0.5) * w
+        cy = ymin + (GY + 0.5) * w
+        centers = np.column_stack([cx.ravel(), cy.ravel()])  # (N, 2)
+    
+        # ------------------------------------------------------------------
+        # inside_grid — vectorised point-in-polygon via matplotlib Path
+        # matplotlib.path.Path.contains_points is a C extension; it handles
+        # one polygon ring at a time, so we check the exterior then subtract holes.
+        # ------------------------------------------------------------------
+        ext_coords  = np.array(safe_zone.exterior.coords)
+        ext_path    = Path(ext_coords)
+        inside_flat = ext_path.contains_points(centers)
+    
+        for interior in safe_zone.interiors:
+            hole_path    = Path(np.array(interior.coords))
+            inside_flat &= ~hole_path.contains_points(centers)
+    
+        inside_grid = inside_flat.reshape(cols, rows)
+    
+        # ------------------------------------------------------------------
+        # radius_grid — vectorised local spacing (mirrors _get_local_r exactly)
+        # ------------------------------------------------------------------
+        r = self.r  # background spacing
+    
+        if not self.refinement_zones:
+            radius_grid = np.full((cols, rows), r, dtype=np.float64)
+            return inside_grid, radius_grid
+    
+        # One pass per zone; track best (most refined / closest) zone per cell.
+        n_cells          = len(centers)
+        best_signed_dist = np.full(n_cells, np.inf, dtype=np.float64)
+        best_factor      = np.ones(n_cells,          dtype=np.float64)
+        best_buf_mult    = np.full(n_cells, 5.0,     dtype=np.float64)
+    
+        for zone in self.refinement_zones:
+            poly        = zone[0]
+            factor      = zone[1]
+            buffer_mult = zone[2] if len(zone) == 3 else 5.0
+            safe_factor = max(factor, 1.1)
+    
+            # Vectorised inside check for this zone via matplotlib Path
+            zone_path = Path(np.array(poly.exterior.coords))
+            is_inside = zone_path.contains_points(centers)   # bool (N,)
+    
+            # Signed distance: negative inside, positive outside.
+            # We approximate boundary distance as distance to the exterior ring,
+            # which is exact for convex zones and a good approximation otherwise.
+            # Shapely is called per-point here, but only ONCE per zone over the
+            # fixed grid — not once per Poisson-disk candidate.
+            signed_dists = np.empty(n_cells, dtype=np.float64)
+            ext_ring = poly.exterior  # cache the attribute lookup
+            for i, (px, py) in enumerate(centers):
+                pt = ShapelyPoint(px, py)
+                d  = ext_ring.distance(pt)
+                signed_dists[i] = -d if is_inside[i] else d
+    
+            # Keep the zone that is "closer" (lower signed distance = more inside)
+            better = signed_dists < best_signed_dist
+            best_signed_dist[better] = signed_dists[better]
+            best_factor[better]      = safe_factor
+            best_buf_mult[better]    = buffer_mult
+    
+        # Smoothstep blending — identical formula to _get_local_r
+        local_refined = r / best_factor                         # spacing inside zone
+        buffer_width  = best_buf_mult * local_refined           # transition band width
+        t             = (best_signed_dist + buffer_width) / (2.0 * buffer_width)
+        t             = np.clip(t, 0.0, 1.0)
+        smooth_t      = t * t * (3.0 - 2.0 * t)               # C1 smoothstep
+        radius_flat   = local_refined * (1.0 - smooth_t) + r * smooth_t
+    
+        radius_grid = radius_flat.reshape(cols, rows)
+        return inside_grid, radius_grid
                
     def finish(self):
         self.finished = True

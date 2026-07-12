@@ -247,22 +247,31 @@ class PhysicsEditor:
                     to_remove = i
                 imgui.pop_style_color(2)
                 imgui.same_line()
-                imgui.text(f"Zone {i+1}: ({rx1:.1f}, {ry1:.1f}) → ({rx2:.1f}, {ry2:.1f})  [{w:.1f}×{h:.1f} {u}]")
+                imgui.text(f"Zone {i+1}:")
+                
                 imgui.same_line()
+                imgui.push_item_width(140)
                 _, zone['factor'] = imgui.input_float(f"##factor_{i}", zone['factor'], step=0.5, step_fast=1.0)
+                imgui.pop_item_width()
                 zone['factor'] = max(1.1, zone['factor'])
+                
                 imgui.same_line()
-                imgui.text(f"×{zone['factor']:.1f}")
-                imgui.same_line()
-                imgui.text_colored(f"→ {self.r / zone['factor']:.2f} {u}", 0.6, 1.0, 0.6, 1.0)
+                imgui.text_colored(f"({self.r / zone['factor']:.1f}{u})", 0.6, 1.0, 0.6, 1.0)
+                
                 # Buffer multiplier per zone
                 bm = zone.get('buffer_mult', 5.0)
                 imgui.same_line()
+                imgui.push_item_width(140)
                 _, zone['buffer_mult'] = imgui.input_float(f"##buf_{i}", bm, step=0.5, step_fast=1.0)
+                imgui.pop_item_width()
                 zone['buffer_mult'] = max(1.0, zone['buffer_mult'])
+                
                 imgui.same_line()
                 local_r = self.r / zone['factor']
-                imgui.text_colored(f"buf×{zone['buffer_mult']:.1f} → {zone['buffer_mult'] * local_r:.2f} {u}", 0.6, 1.0, 0.6, 1.0)
+                imgui.text_colored(f"buf:{zone['buffer_mult'] * local_r:.1f}{u}", 0.6, 1.0, 0.6, 1.0)
+
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip(f"Rect: ({rx1:.1f}, {ry1:.1f}) to ({rx2:.1f}, {ry2:.1f}) [{w:.1f}x{h:.1f} {u}]")
             if to_remove is not None:
                 self.refinement_zones.pop(to_remove)
 
