@@ -31,3 +31,6 @@ __nbcache__/
 
 # ImGui settings (now in home directory)
 *.ini
+
+# Backup/scratch archives (e.g. manual file-import backups)
+*.zip

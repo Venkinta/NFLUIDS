@@ -2,6 +2,8 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import bicgstab, LinearOperator, spilu
 
+from .solver_protocol import SolverProtocol
+
 try:
     import pyamg
     _HAS_PYAMG = True
@@ -32,7 +34,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
-class Solver:
+class Solver(SolverProtocol):
     """
         Solver receives handout from mesher/physics selector with dictionary of geometric information:
             return {
@@ -88,10 +90,14 @@ class Solver:
                              2 = Outlet boundary
         }
     """
-    def __init__(self, mesher_data, inlet_velocity, outlet_pressure, rho, viscosity):
-        # ---Solver parameters
-        self.alpha_u = 0.5 #relaxation factor for velocity
-        self.alpha_p = 0.3 #relaxation factor for pressure
+    def __init__(self, mesher_data, inlet_velocity, outlet_pressure, rho, viscosity,
+                 alpha_u: float = 0.3, alpha_p: float = 0.2,
+                 max_iterations: int = 1600, tolerance: float = 1e-6):
+        # --- Solver parameters (now tunable from PhysicsEditor) ---
+        self.alpha_u       = alpha_u   # velocity under-relaxation
+        self.alpha_p       = alpha_p   # pressure under-relaxation
+        self.max_iterations = max_iterations
+        self.tolerance     = tolerance
                 
         # ---Physical parameters---
         self.inlet_velocity  = np.asarray(inlet_velocity, dtype=np.float64)
@@ -159,6 +165,12 @@ class Solver:
         self._precond_interval = 50   # rebuild ILU every N SIMPLE iterations
         self._iteration        = 0
         self._last_grad_P      = None  # cached for health_check
+
+        # Live cell-level residual maps, refreshed every step() — lets
+        # field_snapshot expose Continuity/Momentum Error during solving,
+        # not just after finalize().
+        self._live_res_cont = np.zeros(self.Nc)
+        self._live_res_mom  = np.zeros(self.Nc)
 
     # ------------------------------------------------------------------
     # One-time topology precomputation
@@ -354,111 +366,175 @@ class Solver:
     # SIMPLE loop
     # ------------------------------------------------------------------
 
-    def Solve(self, max_iterations=1600, tolerance=1e-10):
+    def Solve(self, max_iterations: int = None, tolerance: float = None):
+        """Convenience blocking wrapper around step() — kept for backward compat.
+
+        Prefer SolverPanel for interactive use; this method freezes the render
+        loop for the full duration of the solve.
+        """
+        max_iterations = max_iterations if max_iterations is not None else self.max_iterations
+        tolerance      = tolerance      if tolerance      is not None else self.tolerance
+
         self.initialize_conditions()
-        a_P_u = a_P_v = None
-        initial_cont_rms = None
+        state       = {}
+        last_result = None
 
         for iteration in range(max_iterations):
-            self._iteration = iteration
-            self.U_old = self.U.copy()
+            state['iteration'] = iteration
+            result = self.step(**state)
 
-            self.SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(a_P_u, a_P_v)
+            if result is None:
+                print(f"  Diverged at iteration {iteration} — aborting.")
+                break
 
-            if not np.all(np.isfinite(self.U)):
-                print(f"NaN/Inf in U at iteration {iteration}"); break
+            state       = result
+            last_result = result
 
-            A_mom, b_x, b_y, a_P_u = self.assemble_momentum_both()
-            a_P_v = a_P_u
-
-            if not (np.all(np.isfinite(b_x)) and np.all(np.isfinite(b_y))):
-                print(f"NaN/Inf in RHS at iteration {iteration}"); break
-
-            u_star, v_star = self.GET_VAR_STAR(A_mom, b_x, b_y)
-
-            if not (np.all(np.isfinite(u_star)) and np.all(np.isfinite(v_star))):
-                print(f"NaN/Inf in u* at iteration {iteration}"); break
-
-            # Consistent Rhie‑Chow flux for starred velocities
-            U_star_2d = np.column_stack((u_star, v_star))
-            phi_star = self._compute_rhie_chow_flux(U_star_2d, a_P_u, a_P_v)
-
-            # --- INNER NON-ORTHOGONAL PRESSURE CORRECTOR LOOP ---
-            n_non_ortho_correctors = 2  # Standard choice for unstructured grid skewness stabilization
-            p_prime = np.zeros(self.Nc)
-            grad_p_prime = None
-
-            for non_ortho_iter in range(n_non_ortho_correctors):
-                if non_ortho_iter > 0:
-                    # Calculate gradients of p_prime from previous inner step to apply explicitly
-                    P_tmp = self.P.copy()
-                    self.P = p_prime.copy()
-                    grad_p_prime = self.calculate_pressure_gradients(is_correction=True)
-                    self.P = P_tmp
-
-                A_p, b_p = self.ASSEMBLE_PRESSURE_CORRECTION(a_P_u, a_P_v, phi_star, grad_p_prime=grad_p_prime)
-
-                # Impose p' = 0 at outlet cells inside the linear system
-                outlet_cells = np.unique(self._own_out)
-               #self._impose_dirichlet_on_system(A_p, b_p, outlet_cells, 0.0)
-
-                p_prime = self.GET_VAR_CORRECTED(A_p, b_p)
-
-                if not np.all(np.isfinite(p_prime)):
-                    print(f"NaN/Inf in p' at iteration {iteration}"); break
-
-            self.CORRECT_PRESSURE_AND_VELOCITY(p_prime, a_P_u, a_P_v, u_star, v_star)
-
-            if not np.all(np.isfinite(self.U)):
-                print(f"NaN/Inf in corrected U at iteration {iteration}"); break
-
-            # -----------------------------------------------------------------
-            # Residual computation — mesh‑size‑invariant metrics
-            # -----------------------------------------------------------------
-            res_cont_l2 = np.linalg.norm(b_p)
-            res_cont_rms = res_cont_l2 / np.sqrt(self.Nc)
-            res_cont_max = np.max(np.abs(b_p))
-
-            r_u = A_mom @ self.U[:, 0] - b_x
-            r_v = A_mom @ self.U[:, 1] - b_y
-            res_u_l2 = np.linalg.norm(r_u)
-            res_v_l2 = np.linalg.norm(r_v)
-            res_u_rms = res_u_l2 / np.sqrt(self.Nc)
-            res_v_rms = res_v_l2 / np.sqrt(self.Nc)
-            res_u_max = np.max(np.abs(r_u))
-            res_v_max = np.max(np.abs(r_v))
-
-            if initial_cont_rms is None:
-                initial_cont_rms = max(res_cont_rms, 1e-16)
-
-            # -----------------------------------------------------------------
-            # Printout (every 10 iterations)
-            # -----------------------------------------------------------------
+            res = result['residuals']
             if iteration % 10 == 0:
-                self.health_check(iteration, a_P_u)
-                print(f"Iter {iteration:4d}: "
-                    f"Cont (RMS)={res_cont_rms:.2e} (max)={res_cont_max:.2e}, "
-                    f"U (RMS)={res_u_rms:.2e} (max)={res_u_max:.2e}, "
-                    f"V (RMS)={res_v_rms:.2e} (max)={res_v_max:.2e}")
+                print(f"  Iter {iteration:4d}:  "
+                      f"Cont(RMS)={res['cont_rms']:.2e}  "
+                      f"U(RMS)={res['u_rms']:.2e}  "
+                      f"V(RMS)={res['v_rms']:.2e}")
 
-            # -----------------------------------------------------------------
-            # Convergence check — RMS continuity residual
-            # -----------------------------------------------------------------
-            if iteration > 50:
-                if res_cont_rms < tolerance:
-                    print(f"\nConverged at iteration {iteration}!")
-                    print(f"  Cont (RMS) = {res_cont_rms:.2e}")
-                    print(f"  U    (RMS) = {res_u_rms:.2e}")
-                    print(f"  V    (RMS) = {res_v_rms:.2e}")
-                    break
+            if result['converged']:
+                print(f"\n  Converged at iteration {iteration}!")
+                print(f"    Cont(RMS) = {res['cont_rms']:.2e}")
+                print(f"    U(RMS)    = {res['u_rms']:.2e}")
+                print(f"    V(RMS)    = {res['v_rms']:.2e}")
+                break
         else:
-            print(f"\nDid not converge in {max_iterations} iterations — "
-                f"final continuity RMS = {res_cont_rms:.2e}")
+            if last_result:
+                print(f"\n  Did not converge in {max_iterations} iterations — "
+                      f"final Cont(RMS) = {last_result['residuals']['cont_rms']:.2e}")
 
-        self.final_res_cont = np.abs(b_p)
-        res_u_local = r_u
-        res_v_local = r_v
-        self.final_res_mom = np.sqrt(res_u_local**2 + res_v_local**2)
+        if last_result is not None:
+            self.finalize(**last_result)
+
+    # ------------------------------------------------------------------
+    # SolverProtocol implementation
+    # ------------------------------------------------------------------
+
+    def step(self, **state):
+        """SolverProtocol: one SIMPLE outer iteration.
+
+        Consumes and returns these state keys (all others are passed through):
+            iteration (int)          — current loop index (set by caller).
+            a_P_u / a_P_v (ndarray) — momentum diagonal from previous step.
+            initial_cont_rms (float) — first-iter normalisation; None = unset.
+
+        Returns None on divergence (NaN/Inf detected).
+        """
+        a_P_u            = state.get('a_P_u', None)
+        a_P_v            = state.get('a_P_v', None)
+        initial_cont_rms = state.get('initial_cont_rms', None)
+        iteration        = state.get('iteration', 0)
+
+        self._iteration = iteration
+        self.U_old = self.U.copy()
+
+        self.SIMPLE_UPDATE_FACE_FLUX_AND_DIFFUSSION(a_P_u, a_P_v)
+        if not np.all(np.isfinite(self.U)):
+            print(f"  [step {iteration}] NaN/Inf in U — aborting.")
+            return None
+
+        A_mom, b_x, b_y, a_P_u = self.assemble_momentum_both()
+        a_P_v = a_P_u
+        if not (np.all(np.isfinite(b_x)) and np.all(np.isfinite(b_y))):
+            print(f"  [step {iteration}] NaN/Inf in momentum RHS — aborting.")
+            return None
+
+        u_star, v_star = self.GET_VAR_STAR(A_mom, b_x, b_y)
+        if not (np.all(np.isfinite(u_star)) and np.all(np.isfinite(v_star))):
+            print(f"  [step {iteration}] NaN/Inf in u* — aborting.")
+            return None
+
+        U_star_2d = np.column_stack((u_star, v_star))
+        phi_star  = self._compute_rhie_chow_flux(U_star_2d, a_P_u, a_P_v)
+
+        # Inner non-orthogonal pressure corrector loop
+        n_non_ortho_correctors = 2
+        p_prime      = np.zeros(self.Nc)
+        grad_p_prime = None
+        b_p          = None
+
+        for noc in range(n_non_ortho_correctors):
+            if noc > 0:
+                P_tmp  = self.P.copy()
+                self.P = p_prime.copy()
+                grad_p_prime = self.calculate_pressure_gradients(is_correction=True)
+                self.P = P_tmp
+
+            A_p, b_p = self.ASSEMBLE_PRESSURE_CORRECTION(
+                a_P_u, a_P_v, phi_star, grad_p_prime=grad_p_prime)
+            p_prime = self.GET_VAR_CORRECTED(A_p, b_p)
+
+            if not np.all(np.isfinite(p_prime)):
+                print(f"  [step {iteration}] NaN/Inf in p' — aborting.")
+                return None
+
+        self.CORRECT_PRESSURE_AND_VELOCITY(p_prime, a_P_u, a_P_v, u_star, v_star)
+        if not np.all(np.isfinite(self.U)):
+            print(f"  [step {iteration}] NaN/Inf in corrected U — aborting.")
+            return None
+
+        # --- Residuals ---
+        res_cont_rms = float(np.linalg.norm(b_p) / np.sqrt(self.Nc))
+        res_cont_max = float(np.max(np.abs(b_p)))
+        r_u          = A_mom @ self.U[:, 0] - b_x
+        r_v          = A_mom @ self.U[:, 1] - b_y
+        res_u_rms    = float(np.linalg.norm(r_u) / np.sqrt(self.Nc))
+        res_v_rms    = float(np.linalg.norm(r_v) / np.sqrt(self.Nc))
+
+        self._live_res_cont = np.abs(b_p)
+        self._live_res_mom  = np.sqrt(r_u**2 + r_v**2)
+
+        if initial_cont_rms is None:
+            initial_cont_rms = max(res_cont_rms, 1e-16)
+
+        if iteration % 10 == 0:
+            self.health_check(iteration, a_P_u)
+
+        converged = (iteration > 50 and res_cont_rms < self.tolerance)
+
+        return {
+            # --- Persistent solver state (passed back on next call) ---
+            'a_P_u':            a_P_u,
+            'a_P_v':            a_P_v,
+            'initial_cont_rms': initial_cont_rms,
+            # --- Residuals consumed by SolverPanel ---
+            'residuals': {
+                'cont_rms': res_cont_rms,
+                'cont_max': res_cont_max,
+                'u_rms':    res_u_rms,
+                'v_rms':    res_v_rms,
+            },
+            # --- Raw arrays for finalize() — prefixed to avoid collisions ---
+            '_b_p': b_p,
+            '_r_u': r_u,
+            '_r_v': r_v,
+            'converged': converged,
+        }
+
+    def finalize(self, **final_state) -> None:
+        """SolverProtocol: compute cell-level residual maps from last step."""
+        b_p = final_state.get('_b_p')
+        r_u = final_state.get('_r_u')
+        r_v = final_state.get('_r_v')
+        self.final_res_cont = np.abs(b_p) if b_p is not None else np.zeros(self.Nc)
+        self.final_res_mom  = (np.sqrt(r_u**2 + r_v**2)
+                               if (r_u is not None and r_v is not None)
+                               else np.zeros(self.Nc))
+
+    @property
+    def field_snapshot(self) -> dict:
+        """SolverProtocol: thread-safe copies of the current field arrays."""
+        return {
+            'U':        self.U.copy(),
+            'P':        self.P.copy(),
+            'res_cont': self._live_res_cont.copy(),
+            'res_mom':  self._live_res_mom.copy(),
+        }
 
     # ------------------------------------------------------------------
     # Helper: consistent Rhie‑Chow flux for arbitrary velocity field

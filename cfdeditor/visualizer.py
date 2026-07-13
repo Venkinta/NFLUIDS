@@ -157,16 +157,22 @@ class Visualizer:
             data = self.res_mom
             is_residual = True
 
+        # Robust (percentile-clipped) range instead of true min/max: a single
+        # outlier cell (e.g. a stagnation point) would otherwise hijack the
+        # whole field's color scale and make everything else look like it's
+        # swimming from frame to frame even when it barely changed.
+        _LO_PCT, _HI_PCT = 2, 98
+
         if is_residual:
             # Residual values span orders of magnitude; use Log10 so variations aren't washed out
             # We clip at 1e-10 to prevent log10(0) explosion errors
             log_data = np.log10(np.maximum(data, 1e-10))
-            d_min, d_max = log_data.min(), log_data.max()
+            d_min, d_max = np.nanpercentile(log_data, [_LO_PCT, _HI_PCT])
             denom = d_max - d_min if d_max != d_min else 1.0
             f = np.clip((log_data - d_min) / denom, 0, 1)
         else:
             # Standard linear interpolation for regular physical fields
-            d_min, d_max = np.nanmin(data), np.nanmax(data)
+            d_min, d_max = np.nanpercentile(data, [_LO_PCT, _HI_PCT])
             denom = d_max - d_min if d_max != d_min else 1.0
             f = np.clip((data - d_min) / denom, 0, 1)
 
@@ -182,11 +188,26 @@ class Visualizer:
         glBufferData(GL_ARRAY_BUFFER, expanded_colors.nbytes, expanded_colors, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-    def draw(self, screen, camera):
-        if self.var_idx != self.last_var_idx:
-            self.update_vbo_colors()
-            self.last_var_idx = self.var_idx
+    def update_fields(self, P, U, res_cont=None, res_mom=None):
+        """Swap in new field data (e.g. a live solve snapshot or the final
+        result) without rebuilding geometry. Caller must call
+        update_vbo_colors() afterward to push the new colors to the GPU."""
+        self.P = P
+        self.U = U
+        self.U_mag = np.linalg.norm(U, axis=1)
+        if res_cont is not None:
+            self.res_cont = res_cont
+        if res_mom is not None:
+            self.res_mom = res_mom
 
+    def destroy(self):
+        """Free GPU buffers. Call before dropping the last reference,
+        since a re-solve allocates a brand-new Visualizer/live preview."""
+        glDeleteBuffers(3, [self.pos_vbo, self.color_vbo, self.vector_vbo])
+
+    def draw_geometry(self, camera):
+        """Just the colored mesh fill — no ImGui overlay. Used both by the
+        full post-processor draw() below and by the live solve preview."""
         camera.apply_gl_transform()
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
@@ -196,16 +217,27 @@ class Visualizer:
         glColorPointer(3, GL_FLOAT, 0, None)
         glDrawArrays(GL_TRIANGLES, 0, self.vertex_count)
         glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        camera.remove_gl_transform()
+
+    def draw(self, screen, camera):
+        if self.var_idx != self.last_var_idx:
+            self.update_vbo_colors()
+            self.last_var_idx = self.var_idx
+
+        self.draw_geometry(camera)
 
         if self.show_vectors:
+            camera.apply_gl_transform()
+            glEnableClientState(GL_VERTEX_ARRAY)
             glColor3f(*self.vector_color)
             glBindBuffer(GL_ARRAY_BUFFER, self.vector_vbo)
             glVertexPointer(2, GL_FLOAT, 0, None)
             glDrawArrays(GL_LINES, 0, self.vector_vertex_count)
-
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        camera.remove_gl_transform()
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            camera.remove_gl_transform()
 
         # --- UI and Probing ---
         imgui.new_frame()
@@ -252,7 +284,7 @@ class Visualizer:
         elif self.var_idx == 3: data = self.res_mom
         
         imgui.text(f"Range: {np.nanmin(data):.2e} to {np.nanmax(data):.2e}")
-        if imgui.button("Return to Editor", width=-1, height=30): self.finished = True
+        if imgui.button("Back to Physics", width=-1, height=30): self.finished = True
         imgui.end()
         
         imgui.render()

@@ -83,6 +83,13 @@ class PhysicsEditor:
         # --- Re calculator part ---
         self.char_length = 1.0 # Default to 1m, 1mm, etc.
 
+        # --- Solver Settings (passed to Solver.__init__ and SolverPanel) ---
+        self.alpha_u        = 0.3      # velocity under-relaxation
+        self.alpha_p        = 0.2      # pressure under-relaxation
+        self.max_iterations = 1600
+        self.tolerance      = 1e-6     # continuity RMS convergence criterion
+        self.viz_interval   = 10       # live field snapshot every N iterations
+
     # ------------------------------------------------------------------
     def _line_length(self, line):
         """Returns length of a line in world units."""
@@ -158,7 +165,11 @@ class PhysicsEditor:
             imgui.end_tooltip()
 
         # ---- Main Settings Window ----
-        imgui.begin("Mesher Settings")
+        # Auto-fit to content, but cap height so it can't grow past the
+        # screen on tall control lists (refinement zones, solver settings).
+        max_h = imgui.get_io().display_size[1] * 0.9
+        imgui.set_next_window_size_constraints((0, 0), (480, max_h))
+        imgui.begin("Mesher Settings", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)
 
         changed_u, self._unit_idx = imgui.combo("World units", self._unit_idx, self._unit_names)
         if changed_u:
@@ -292,6 +303,52 @@ class PhysicsEditor:
             self._refine_factor = max(1.1, self._refine_factor)
             _, self._refine_buffer_mult = imgui.input_float("Buffer multiplier", self._refine_buffer_mult, step=0.5, step_fast=1.0)
             self._refine_buffer_mult = max(1.0, self._refine_buffer_mult)
+
+        imgui.separator()
+
+        opened_s, _ = imgui.collapsing_header("Solver Settings")
+        if opened_s:
+            imgui.push_item_width(160)
+
+            _, self.alpha_u = imgui.slider_float(
+                "alpha_u  (velocity relax.)", self.alpha_u, 0.01, 0.99, format="%.2f")
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Under-relaxation for U/V momentum equations.\n"
+                                  "Lower = more stable but slower convergence.\n"
+                                  "High-Re or separated flows may need 0.1–0.2.")
+
+            _, self.alpha_p = imgui.slider_float(
+                "alpha_p  (pressure relax.)", self.alpha_p, 0.01, 0.99, format="%.2f")
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Under-relaxation for pressure correction.\n"
+                                  "Typically half of alpha_u. Reduce for stability.")
+
+            _, self.max_iterations = imgui.input_int(
+                "Max iterations", self.max_iterations, step=100, step_fast=500)
+            self.max_iterations = max(1, self.max_iterations)
+
+            # Tolerance as a log10 slider: "1e-N" where N = 3..10
+            tol_exp = int(round(-np.log10(max(self.tolerance, 1e-15))))
+            tol_exp = max(3, min(tol_exp, 10))
+            changed_tol, tol_exp = imgui.slider_int(
+                "Tolerance  (1e-N)", tol_exp, 3, 10)
+            if changed_tol:
+                self.tolerance = 10.0 ** (-tol_exp)
+            imgui.same_line()
+            imgui.text_colored(f"= {self.tolerance:.0e}", 0.6, 1.0, 0.6, 1.0)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Continuity RMS residual target.\n"
+                                  "1e-4 is typical; 1e-6 for production results.")
+
+            _, self.viz_interval = imgui.input_int(
+                "Live viz every N iters", self.viz_interval, step=5)
+            self.viz_interval = max(1, self.viz_interval)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("How often the background field is updated\n"
+                                  "in the Solver Monitor during a solve.\n"
+                                  "Higher = less GPU overhead during solving.")
+
+            imgui.pop_item_width()
 
         imgui.separator()
         mesh_label = "Remesh" if self.has_mesh else "Mesh"

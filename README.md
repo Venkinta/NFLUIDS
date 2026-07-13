@@ -14,16 +14,18 @@ python NFluid.py
 ## Workflow
 
 ```
-CAD Drawing  →  Assign BCs  →  Generate Mesh  →  Solve  →  Visualize
-   (EDITOR)      (PHYSICS)       (MESHER)       (SOLVER)   (VISUALIZER)
+CAD Drawing  →  Assign BCs  →  Generate Mesh  →  Solve   →  Visualize
+   (EDITOR)      (PHYSICS)       (MESHER)      (SOLVING)   (VISUALIZER)
 ```
 
 You can also **skip the CAD step** by loading a previously saved mesh:
 
 ```
-Load Mesh  →  Inspect / Edit BCs  →  (Remesh)  →  Solve  →  Visualize
-  (PHYSICS)      (PHYSICS)            (MESHER)    (SOLVER)   (VISUALIZER)
+Load Mesh  →  Inspect / Edit BCs  →  (Remesh)  →  Solve   →  Visualize
+  (PHYSICS)      (PHYSICS)            (MESHER)   (SOLVING)   (VISUALIZER)
 ```
+
+From Visualize you can also go straight back to **(PHYSICS)** — the mesh, boundary conditions, and view all stay intact, so you can tweak solver settings and re-solve immediately without remeshing.
 
 ### 1. Draw Your Geometry (EDITOR)
 - **Left-click** to place points and draw lines (chain-drawing mode).
@@ -43,6 +45,7 @@ Load Mesh  →  Inspect / Edit BCs  →  (Remesh)  →  Solve  →  Visualize
 - Assign each line a **boundary type**: `Wall`, `Velocity Inlet`, or `Pressure Outlet`.
 - Configure **fluid properties** (density, viscosity).
 - Configure **mesh parameters** (boundary layer settings, mesh size).
+- Configure **Solver Settings** (relaxation factors `alpha_u`/`alpha_p`, max iterations, convergence tolerance, live-viz update interval).
 - The **Reynolds number** estimator gives a DNS cell count prediction.
 - Click **"Mesh"** to generate the computational grid.
 
@@ -53,19 +56,19 @@ that produced the loaded mesh. The CAD lines and their boundary types are also
 reconstructed, so you can edit conditions or remesh before solving.
 **Refinement zones** are also preserved across save/load.
 
-### 3. Solve (SOLVER)
-The solver runs automatically after meshing. It uses the **SIMPLE algorithm** with:
+### 3. Solve (SOLVING)
+Clicking **"Solve"** launches the solver on a background thread, so the UI stays responsive throughout. It uses the **SIMPLE algorithm** with:
 - Rhie-Chow interpolation for pressure-velocity coupling.
 - BiCGSTAB with Jacobi (momentum) and ILU/PyAMG (pressure) preconditioners.
 - Convergence is measured by RMS continuity residual (default tolerance: 1e-6).
 
-Progress is printed to the console every 10 iterations.
+A live **Solver Monitor** panel shows continuity and momentum RMS residual plots (log10) updated every frame, the current iteration count, and pause / step-one / stop controls. The mesh itself is colored live, refreshed every `viz_interval` iterations (configurable in Solver Settings) — a "Show" dropdown in the monitor lets you switch between Pressure, Velocity, Continuity Error, and Momentum Error while the solve is still running, same as the post-solve Visualizer.
 
 ### 4. Visualize Results (VISUALIZER)
 - Switch between **Pressure**, **Velocity**, **Continuity Error**, and **Momentum Error** fields.
 - Toggle **velocity vectors** with adjustable scale.
 - **Hover** over any cell to probe local values (P, Ux, Uy, residual errors).
-- Click **"Return to Editor"** to start a new simulation.
+- Click **"Back to Physics"** to return to the Physics panel — mesh and BCs are preserved, so you can tweak solver settings and re-solve immediately.
 
 ## Features
 
@@ -94,9 +97,12 @@ Progress is printed to the console every 10 iterations.
 - **Distance-weighted face interpolation** (`g_x = d_Pf / d_PN`) for correct behavior on non-uniform/refined meshes — makes refinement zones numerically sound (no artificial "resistance" at cell-size transitions)
 - Multiple linear solver backends (BiCGSTAB + Jacobi/ILU/PyAMG)
 - Numba JIT compilation for hot loops
+- Built against a `SolverProtocol` ABC — alternate solver implementations (e.g. a future LES solver) are drop-in replacements with zero changes elsewhere in the app
+- Runs on a background thread with a live residual-plot monitor, so the UI never blocks during a solve
 
 ### Post-Processor
 - Color-mapped field visualization (jet-like native colormap)
+- **Robust (percentile-clipped) color scaling** — the 2nd–98th percentile of each field sets the color range, so a single outlier cell (e.g. a leading-edge stagnation point) can't hijack the whole mesh's colors and make a converged field look like it's still swimming
 - Interactive point probing with KD-tree spatial indexing
 - Velocity vector glyphs with adjustable scale
 - Log-scale residual visualization for error analysis
@@ -127,6 +133,8 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `physics_editor.py` | Boundary condition and mesh parameter UI |
 | `mesher.py` | Mesh generation pipeline (multi-loop, holes) |
 | `solver.py` | SIMPLE algorithm (Navier-Stokes solver) |
+| `solver_protocol.py` | Abstract solver interface (`SolverProtocol`) |
+| `solver_panel.py` | Threaded solve orchestration + live monitor UI |
 | `visualizer.py` | Post-processing and field visualization |
 | `camera.py` | World↔screen coordinate transforms, drawing primitives |
 | `point.py` | 2D point geometry primitive |
@@ -144,7 +152,6 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 
 - **Units migration in progress**: The solver expects SI units (metres). The mesher→solver handoff converts world units to metres via `unit_to_meters`, and boundary-face tagging tolerance is now scale-aware (`boundary_spacing`), so metre-scale geometries tag correctly. CAD defaults still assume mm.
 - **Per-line BC values** (`u_val`, `v_val`, `p_val` on `Line`) are declared but not yet used by the solver.
-- **Solver runs synchronously** in the SOLVER state and blocks the UI until convergence (no progress rendering mid-solve).
 
 ## Technical Background
 
