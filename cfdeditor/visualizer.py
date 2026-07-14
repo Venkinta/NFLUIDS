@@ -3,11 +3,16 @@ from OpenGL.GL import *
 import imgui
 import numpy as np
 from scipy.spatial import cKDTree # Efficient spatial searching
+from .smoke_particles import SmokeParticles
 
 class Visualizer:
-    def __init__(self, renderer, mesher, P, U, res_cont=None, res_mom=None):
+    def __init__(self, renderer, mesher, P, U, res_cont=None, res_mom=None, mesh_data=None):
         self.renderer = renderer
         self.mesher = mesher
+        # solver_data_pipeline() dict (boundary_tags/Cf/unit_to_meters) — used
+        # by SmokeParticles to find velocity-inlet faces to seed from. Not
+        # used for rendering/geometry (that's still `mesher` above).
+        self.mesh_data = mesh_data
         self.P = P
         self.U = U
         self.U_mag = np.linalg.norm(U, axis=1)
@@ -44,6 +49,9 @@ class Visualizer:
 
         # Build the KDTree for the probe
         self.tree = cKDTree(self.centroids)
+
+        self.show_particles = False
+        self.smoke = SmokeParticles(owner=self)
 
     def _setup_geometry_vbo(self):
         """Flattens cells and stores centroids for the spatial index.
@@ -204,6 +212,88 @@ class Visualizer:
         """Free GPU buffers. Call before dropping the last reference,
         since a re-solve allocates a brand-new Visualizer/live preview."""
         glDeleteBuffers(3, [self.pos_vbo, self.color_vbo, self.vector_vbo])
+        self.smoke.destroy()
+
+    def restore_display_settings(self, data):
+        """Apply saved var_idx/show_vectors/vector_scale from a loaded
+        visualization dict. np.savez turns Python scalars into 0-d arrays,
+        same reasoning as meshIO.load_mesh_for_solver's Nc/Nf casting."""
+        if 'var_idx' in data:
+            self.var_idx = int(data['var_idx'])
+        if 'show_vectors' in data:
+            self.show_vectors = bool(data['show_vectors'])
+        if 'vector_scale' in data:
+            self.vector_scale = float(data['vector_scale'])
+        self._update_vector_vbo()
+        self.update_vbo_colors()
+        self.last_var_idx = self.var_idx
+
+    def open_save_dialog(self):
+        """Opens a native OS file dialog to save this visualization (mesh +
+        solved fields + a few display settings) as a .npz, mirroring
+        PhysicsEditor.open_save_dialog()."""
+        import tkinter as tk
+        from tkinter import filedialog
+        from . import meshIO
+
+        if not self.mesh_data:
+            print("[UI] No mesh data available to save this visualization.")
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".npz",
+            filetypes=[("NumPy Compressed Archive", "*.npz"), ("All Files", "*.*")],
+            title="Export Visualization"
+        )
+
+        root.destroy()
+
+        if filepath:
+            print(f"[UI] User selected visualization save path: {filepath}")
+            combined = dict(self.mesh_data)
+            combined.update({
+                'P': self.P, 'U': self.U,
+                'res_cont': self.res_cont, 'res_mom': self.res_mom,
+                'var_idx': self.var_idx, 'show_vectors': self.show_vectors,
+                'vector_scale': self.vector_scale,
+            })
+            meshIO.save_mesh_for_solver(combined, filepath)
+
+    def open_export_vtu_dialog(self):
+        """Opens a native OS file dialog to export this visualization as a
+        VTK XML UnstructuredGrid (.vtu) — for cross-validating the solver
+        against other CFD codes (e.g. opening the result in ParaView)."""
+        import tkinter as tk
+        from tkinter import filedialog
+        from . import vtuIO
+
+        if not self.mesh_data:
+            print("[UI] No mesh data available to export.")
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".vtu",
+            filetypes=[("VTK UnstructuredGrid", "*.vtu"), ("All Files", "*.*")],
+            title="Export VTU"
+        )
+
+        root.destroy()
+
+        if filepath:
+            print(f"[UI] User selected VTU export path: {filepath}")
+            vtuIO.export_vtu(
+                self.mesh_data, filepath,
+                P=self.P, U=self.U,
+                res_cont=self.res_cont, res_mom=self.res_mom,
+            )
 
     def draw_geometry(self, camera):
         """Just the colored mesh fill — no ImGui overlay. Used both by the
@@ -221,7 +311,7 @@ class Visualizer:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         camera.remove_gl_transform()
 
-    def draw(self, screen, camera):
+    def draw(self, screen, camera, dt):
         if self.var_idx != self.last_var_idx:
             self.update_vbo_colors()
             self.last_var_idx = self.var_idx
@@ -238,6 +328,10 @@ class Visualizer:
             glDisableClientState(GL_VERTEX_ARRAY)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             camera.remove_gl_transform()
+
+        if self.show_particles:
+            self.smoke.step(dt)
+            self.smoke.draw(camera)
 
         # --- UI and Probing ---
         imgui.new_frame()
@@ -267,7 +361,7 @@ class Visualizer:
 
         # Main Control Window
         imgui.set_next_window_position(10, 10, imgui.ALWAYS)
-        imgui.set_next_window_size(300, 260) # Expanded slightly for visibility
+        imgui.set_next_window_size(300, 495) # Expanded for vectors + particle + save + export controls
         imgui.begin("Post-Processor", True)
         _, self.var_idx = imgui.combo("Visualize", self.var_idx, self.vars)
         imgui.separator()
@@ -275,6 +369,16 @@ class Visualizer:
         if self.show_vectors:
             changed_scale, self.vector_scale = imgui.slider_float("Vector Scale", self.vector_scale, 0.01, 50.0)
             if changed_scale: self._update_vector_vbo()
+        imgui.separator()
+        _, self.show_particles = imgui.checkbox("Show Smoke Particles", self.show_particles)
+        if self.show_particles:
+            _, self.smoke.speed_scale = imgui.slider_float("Particle Speed", self.smoke.speed_scale, 0.05, 50.0)
+            _, self.smoke.point_size = imgui.slider_float("Particle Size", self.smoke.point_size, 1.0, 10.0)
+            changed_count, new_count = imgui.slider_int("Particle Count", self.smoke.count, 50, 5000)
+            if changed_count: self.smoke.set_count(new_count)
+            _, self.smoke.limit_lifetime = imgui.checkbox("Limit Particle Lifetime", self.smoke.limit_lifetime)
+            if self.smoke.limit_lifetime:
+                _, self.smoke.lifetime = imgui.slider_float("Lifetime (s)", self.smoke.lifetime, 1.0, 30.0)
         imgui.separator()
         
         # === CHANGED: Dynamic range tracking for residuals vs fields ===
@@ -284,6 +388,8 @@ class Visualizer:
         elif self.var_idx == 3: data = self.res_mom
         
         imgui.text(f"Range: {np.nanmin(data):.2e} to {np.nanmax(data):.2e}")
+        if imgui.button("Save Visualization", width=-1, height=30): self.open_save_dialog()
+        if imgui.button("Export VTU", width=-1, height=30): self.open_export_vtu_dialog()
         if imgui.button("Back to Physics", width=-1, height=30): self.finished = True
         imgui.end()
         

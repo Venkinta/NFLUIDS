@@ -31,7 +31,13 @@ class PhysicsEditor:
         # dict and skips the meshing step entirely.
         self.load_requested = False
         self.loaded_mesh = None
-        
+
+        # Loaded-visualization handoff: like loaded_mesh, but the .npz also
+        # carries solved fields (P/U/...), so main.py jumps straight to the
+        # VISUALIZER state instead of landing in PHYSICS for a re-solve.
+        self.load_visualization_requested = False
+        self.loaded_visualization = None
+
         # --- Fluid Properties (always SI) ---
         self.density = 1.2       # kg/m3
         self.viscosity = 0.002   # Pa*s
@@ -364,6 +370,9 @@ class PhysicsEditor:
         imgui.same_line()
         if imgui.button("Load Mesh"):
             self.open_load_dialog()
+        imgui.same_line()
+        if imgui.button("Load Visualization"):
+            self.open_load_visualization_dialog()
         imgui.end()
 
         # ---- Per-Line Selection Popup ----
@@ -565,4 +574,34 @@ class PhysicsEditor:
             print(f"[UI] User selected load path: {filepath}")
             self.loaded_mesh = meshIO.load_mesh_for_solver(filepath)
             self.load_requested = True
+            self.selected_line = None  # Reset selection to avoid crash on stale line object
+
+    def open_load_visualization_dialog(self):
+        """Opens a native OS file dialog to pick a saved visualization (.npz
+        with solved fields) to load — jumps straight to VISUALIZER, skipping
+        the meshing/solving steps entirely."""
+        import tkinter as tk
+        from tkinter import filedialog
+        from . import meshIO
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        filepath = filedialog.askopenfilename(
+            defaultextension=".npz",
+            filetypes=[("NumPy Compressed Archive", "*.npz"), ("All Files", "*.*")],
+            title="Load Visualization"
+        )
+
+        root.destroy()
+
+        if filepath:
+            print(f"[UI] User selected visualization load path: {filepath}")
+            data = meshIO.load_mesh_for_solver(filepath)
+            if 'P' not in data or 'U' not in data:
+                print("[UI] File has no solved fields — use Load Mesh instead.")
+                return
+            self.loaded_visualization = data
+            self.load_visualization_requested = True
             self.selected_line = None  # Reset selection to avoid crash on stale line object

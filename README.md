@@ -56,6 +56,13 @@ that produced the loaded mesh. The CAD lines and their boundary types are also
 reconstructed, so you can edit conditions or remesh before solving.
 **Refinement zones** are also preserved across save/load.
 
+**Load Visualization** (also in the PHYSICS panel) opens a previously
+**saved visualization** file instead — same `.npz` format as Load Mesh, plus
+the solved fields, so it jumps straight to the VISUALIZER screen showing the
+same colors, vectors, and probe values as when it was saved, skipping the
+mesh/solve steps entirely. "Back to Physics" from there works exactly like a
+normal solve, with the mesh/BCs available for editing and re-solving.
+
 ### 3. Solve (SOLVING)
 Clicking **"Solve"** launches the solver on a background thread, so the UI stays responsive throughout. It uses the **SIMPLE algorithm** with:
 - Rhie-Chow interpolation for pressure-velocity coupling.
@@ -67,7 +74,10 @@ A live **Solver Monitor** panel shows continuity and momentum RMS residual plots
 ### 4. Visualize Results (VISUALIZER)
 - Switch between **Pressure**, **Velocity**, **Continuity Error**, and **Momentum Error** fields.
 - Toggle **velocity vectors** with adjustable scale.
+- Toggle **smoke particles** — tracer points spawned at the velocity inlet and advected through the solved velocity field, reseeding at the inlet only once they exit the mesh (they don't expire on a timer by default, so a particle drifting into a slow/recirculating region just stalls there). Adjustable speed, point size, and particle count, plus an optional lifetime limit if you want particles to expire after N seconds regardless of position.
 - **Hover** over any cell to probe local values (P, Ux, Uy, residual errors).
+- Click **"Save Visualization"** to export the mesh, solved fields, and current display settings (variable shown, vector toggle/scale) as a `.npz` — reopen it later with **Load Visualization** in the PHYSICS panel.
+- Click **"Export VTU"** to write the mesh + solved fields (Pressure, Velocity, residuals) as a VTK XML UnstructuredGrid (`.vtu`) — open it in ParaView or another CFD tool to cross-validate the solver against a different code.
 - Click **"Back to Physics"** to return to the Physics panel — mesh and BCs are preserved, so you can tweak solver settings and re-solve immediately.
 
 ## Features
@@ -105,6 +115,7 @@ A live **Solver Monitor** panel shows continuity and momentum RMS residual plots
 - **Robust (percentile-clipped) color scaling** — the 2nd–98th percentile of each field sets the color range, so a single outlier cell (e.g. a leading-edge stagnation point) can't hijack the whole mesh's colors and make a converged field look like it's still swimming
 - Interactive point probing with KD-tree spatial indexing
 - Velocity vector glyphs with adjustable scale
+- Smoke particle tracers, spawned at the velocity inlet and advected through the frozen post-solve velocity field, reseeding at the inlet on mesh exit — adjustable speed, point size, and particle count, with an optional user-set lifetime limit
 - Log-scale residual visualization for error analysis
 - OpenGL VBO-based rendering for large meshes
 
@@ -144,7 +155,8 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `bowyerwatson.py` | Delaunay triangulation algorithm |
 | `constructor.py` | Numba JIT kernels and geometry helpers |
 | `snapengine.py` | Vertex and axis snapping |
-| `meshIO.py` | Save/Load mesh to/from compressed `.npz` files |
+| `meshIO.py` | Save/Load mesh (and, via the same generic dict format, full visualizations) to/from compressed `.npz` files |
+| `vtuIO.py` | Export mesh + solved fields as a VTK XML UnstructuredGrid (`.vtu`), for cross-validation in ParaView/other CFD codes |
 | `test_holes.py` | End-to-end test for multi-loop meshing with holes |
 | `CODEBASE_REFERENCE.md` | Internal developer documentation |
 

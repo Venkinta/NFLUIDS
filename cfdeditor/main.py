@@ -25,6 +25,91 @@ import cProfile
 import pstats
 
 
+def _apply_loaded_mesh_settings(physicseditor, loaded, vbos):
+    """Rebuild BC lines, solver/mesh settings, and the wireframe preview VBOs
+    from a loaded .npz dict (`loaded` — a plain mesh save or a visualization
+    save, both carry the same mesh-side keys). Shared by both the "Load
+    Mesh" and "Load Visualization" flows so returning to PHYSICS afterward
+    always shows a consistent, populated state. Returns the new `vbos` dict."""
+    bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet", "Symmetry"]
+    cad = loaded['cad_lines']
+    lines = []
+    for row in cad:
+        ax, ay, bx, by, bc_idx = row
+        line = Line(Point(ax, ay), Point(bx, by))
+        line.boundary_type = bc_names[int(bc_idx)]
+        lines.append(line)
+    physicseditor.lines = lines
+
+    physicseditor.n_layers         = int(loaded['n_layers'])
+    physicseditor.growth_factor    = float(loaded['growth_factor'])
+    physicseditor.thickness        = float(loaded['thickness'])
+    physicseditor.boundary_spacing = float(loaded['boundary_spacing'])
+    physicseditor.r                = float(loaded['r'])
+    physicseditor.unit_to_meters   = float(loaded['unit_to_meters'])
+
+    _unit_factors = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+    for i, name in enumerate(["mm", "cm", "m"]):
+        if abs(_unit_factors[name] - physicseditor.unit_to_meters) < 1e-12:
+            physicseditor._unit_idx = i
+            break
+
+    if 'bc_spacing_map' in loaded:
+        physicseditor._bc_spacing = loaded['bc_spacing_map'].item()
+        physicseditor._spacing_linked = False
+        vals = list(physicseditor._bc_spacing.values())
+        if len(set(round(v, 9) for v in vals)) == 1:
+            physicseditor._spacing_linked = True
+    else:
+        for k in physicseditor._bc_spacing:
+            physicseditor._bc_spacing[k] = physicseditor.boundary_spacing
+        physicseditor._spacing_linked = True
+
+    if 'refinement_zones' in loaded:
+        zones = []
+        for entry in loaded['refinement_zones']:
+            coords      = entry[0]
+            factor      = float(entry[1])
+            buffer_mult = float(entry[2]) if len(entry) >= 3 else 5.0
+            xs = coords[:, 0]; ys = coords[:, 1]
+            zones.append({
+                'rect': (float(xs.min()), float(ys.min()),
+                         float(xs.max()), float(ys.max())),
+                'factor': factor,
+                'buffer_mult': buffer_mult,
+            })
+        physicseditor.refinement_zones = zones
+
+    cv = loaded['cell_vertices'] / physicseditor.unit_to_meters
+    nv = loaded['cell_nverts']
+    tri_coords, quad_coords = [], []
+    for i in range(len(nv)):
+        n   = int(nv[i])
+        pts = [(float(cv[i, v, 0]), float(cv[i, v, 1])) for v in range(n)]
+        if n == 4:
+            quad_coords.extend([pts[0], pts[1], pts[1], pts[2],
+                                pts[2], pts[3], pts[3], pts[0]])
+        else:
+            tri_coords.extend([pts[0], pts[1], pts[1], pts[2],
+                               pts[2], pts[0]])
+
+    for _vbo_id, _ in vbos.values():
+        glDeleteBuffers(1, [_vbo_id])
+    vbos = {}
+    for key, coords in (('triangles', tri_coords), ('quads', quad_coords)):
+        if coords:
+            vbo_data = np.array(coords, dtype=np.float32)
+            vbo_id   = glGenBuffers(1)
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+            glBufferData(GL_ARRAY_BUFFER, vbo_data.nbytes, vbo_data, GL_STATIC_DRAW)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            vbos[key] = (vbo_id, len(coords))
+
+    physicseditor.has_mesh = True
+    physicseditor.mesher   = None
+    return vbos
+
+
 def run_app():
     pygame.init()
     WIDTH, HEIGHT = 1920, 1080
@@ -61,7 +146,7 @@ def run_app():
     vbos    = {}
 
     while running:
-        clock.tick(60)
+        dt = clock.tick(60) / 1000.0
         events = pygame.event.get()
 
         for event in events:
@@ -134,84 +219,26 @@ def run_app():
             # --- Load saved mesh (.npz) ---
             if physicseditor.load_requested:
                 physicseditor.load_requested = False
-                loaded = physicseditor.loaded_mesh
+                vbos = _apply_loaded_mesh_settings(physicseditor, physicseditor.loaded_mesh, vbos)
 
-                bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet", "Symmetry"]
-                cad = loaded['cad_lines']
-                lines = []
-                for row in cad:
-                    ax, ay, bx, by, bc_idx = row
-                    line = Line(Point(ax, ay), Point(bx, by))
-                    line.boundary_type = bc_names[int(bc_idx)]
-                    lines.append(line)
-                physicseditor.lines = lines
+            # --- Load saved visualization (.npz with solved fields) → straight to VISUALIZER ---
+            if physicseditor.load_visualization_requested:
+                physicseditor.load_visualization_requested = False
+                data = physicseditor.loaded_visualization
+                vbos = _apply_loaded_mesh_settings(physicseditor, data, vbos)
+                physicseditor.loaded_mesh = data  # so Save Mesh / re-solve still works later
 
-                physicseditor.n_layers         = int(loaded['n_layers'])
-                physicseditor.growth_factor    = float(loaded['growth_factor'])
-                physicseditor.thickness        = float(loaded['thickness'])
-                physicseditor.boundary_spacing = float(loaded['boundary_spacing'])
-                physicseditor.r                = float(loaded['r'])
-                physicseditor.unit_to_meters   = float(loaded['unit_to_meters'])
+                vis_dict = dict(data)
+                vis_dict['cell_vertices'] = data['cell_vertices'] / physicseditor.unit_to_meters
+                vis_dict['cell_centers']  = data['cell_centers']  / physicseditor.unit_to_meters
 
-                _unit_factors = {"mm": 0.001, "cm": 0.01, "m": 1.0}
-                for i, name in enumerate(["mm", "cm", "m"]):
-                    if abs(_unit_factors[name] - physicseditor.unit_to_meters) < 1e-12:
-                        physicseditor._unit_idx = i
-                        break
-
-                if 'bc_spacing_map' in loaded:
-                    physicseditor._bc_spacing = loaded['bc_spacing_map'].item()
-                    physicseditor._spacing_linked = False
-                    vals = list(physicseditor._bc_spacing.values())
-                    if len(set(round(v, 9) for v in vals)) == 1:
-                        physicseditor._spacing_linked = True
-                else:
-                    for k in physicseditor._bc_spacing:
-                        physicseditor._bc_spacing[k] = physicseditor.boundary_spacing
-                    physicseditor._spacing_linked = True
-
-                if 'refinement_zones' in loaded:
-                    zones = []
-                    for entry in loaded['refinement_zones']:
-                        coords      = entry[0]
-                        factor      = float(entry[1])
-                        buffer_mult = float(entry[2]) if len(entry) >= 3 else 5.0
-                        xs = coords[:, 0]; ys = coords[:, 1]
-                        zones.append({
-                            'rect': (float(xs.min()), float(ys.min()),
-                                     float(xs.max()), float(ys.max())),
-                            'factor': factor,
-                            'buffer_mult': buffer_mult,
-                        })
-                    physicseditor.refinement_zones = zones
-
-                cv = loaded['cell_vertices'] / physicseditor.unit_to_meters
-                nv = loaded['cell_nverts']
-                tri_coords, quad_coords = [], []
-                for i in range(len(nv)):
-                    n   = int(nv[i])
-                    pts = [(float(cv[i, v, 0]), float(cv[i, v, 1])) for v in range(n)]
-                    if n == 4:
-                        quad_coords.extend([pts[0], pts[1], pts[1], pts[2],
-                                            pts[2], pts[3], pts[3], pts[0]])
-                    else:
-                        tri_coords.extend([pts[0], pts[1], pts[1], pts[2],
-                                           pts[2], pts[0]])
-
-                for _vbo_id, _ in vbos.values():
-                    glDeleteBuffers(1, [_vbo_id])
-                vbos = {}
-                for key, coords in (('triangles', tri_coords), ('quads', quad_coords)):
-                    if coords:
-                        vbo_data = np.array(coords, dtype=np.float32)
-                        vbo_id   = glGenBuffers(1)
-                        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-                        glBufferData(GL_ARRAY_BUFFER, vbo_data.nbytes, vbo_data, GL_STATIC_DRAW)
-                        glBindBuffer(GL_ARRAY_BUFFER, 0)
-                        vbos[key] = (vbo_id, len(coords))
-
-                physicseditor.has_mesh = True
-                physicseditor.mesher   = None
+                visualizer = Visualizer(
+                    renderer, vis_dict, data['P'], data['U'],
+                    res_cont=data.get('res_cont'), res_mom=data.get('res_mom'),
+                    mesh_data=data,
+                )
+                visualizer.restore_display_settings(data)
+                current_state = "VISUALIZER"
 
             # --- Solve → launch threaded SolverPanel ---
             if physicseditor.solve_requested:
@@ -252,6 +279,7 @@ def run_app():
                     renderer, vis_mesher,
                     np.zeros(mesh_data['Nc']),
                     np.zeros((mesh_data['Nc'], 2)),
+                    mesh_data=mesh_data,
                 )
                 current_state = "SOLVING"
 
@@ -305,7 +333,7 @@ def run_app():
             solver_panel.draw(screen, camera, live_field=live_field)
 
         elif current_state == "VISUALIZER":
-            visualizer.draw(screen, camera)
+            visualizer.draw(screen, camera, dt)
 
         pygame.display.flip()
 
