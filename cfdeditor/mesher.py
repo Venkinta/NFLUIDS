@@ -265,31 +265,46 @@ class Mesher:
         The hot Poisson-disk loop uses radius_grid instead.
         """
         p_shapely = ShapelyPoint(candidate)
-    
+
         min_signed_dist = None
         best_factor     = None
         best_buffer_mult = 5.0
-    
+
+        # Containment tier: if the point sits inside one or more zones, the
+        # smallest-area one wins outright — this is what makes a small nested
+        # zone dominate its own footprint instead of losing to a larger
+        # enclosing zone (see the matching logic in _precompute_domain_grids).
+        containing = []
         for zone in self.refinement_zones:
             if len(zone) == 3:
                 poly, factor, buffer_mult = zone
             else:
                 poly, factor = zone
                 buffer_mult  = 5.0
-            safe_factor = max(factor, 1.1)
-    
             if poly.contains(p_shapely):
-                dist        = poly.exterior.distance(p_shapely)
-                signed_dist = -dist
-            else:
-                dist        = poly.distance(p_shapely)
-                signed_dist = dist
-    
-            if min_signed_dist is None or signed_dist < min_signed_dist:
-                min_signed_dist  = signed_dist
-                best_factor      = safe_factor
-                best_buffer_mult = buffer_mult
-    
+                containing.append((poly, max(factor, 1.1), buffer_mult))
+
+        if containing:
+            poly, best_factor, best_buffer_mult = min(containing, key=lambda z: z[0].area)
+            min_signed_dist = -poly.exterior.distance(p_shapely)
+        else:
+            # Transition tier: no zone contains the point — fall back to the
+            # nearest zone by signed distance, exactly as before.
+            for zone in self.refinement_zones:
+                if len(zone) == 3:
+                    poly, factor, buffer_mult = zone
+                else:
+                    poly, factor = zone
+                    buffer_mult  = 5.0
+                safe_factor = max(factor, 1.1)
+
+                signed_dist = poly.distance(p_shapely)
+
+                if min_signed_dist is None or signed_dist < min_signed_dist:
+                    min_signed_dist  = signed_dist
+                    best_factor      = safe_factor
+                    best_buffer_mult = buffer_mult
+
         if best_factor is None or min_signed_dist is None:
             return base_r
     
@@ -327,7 +342,13 @@ class Mesher:
                         for i, ring in enumerate(inner_rings)
                         if i != self.outer_idx and len(ring) >= 3]
         full_poly = ShapelyPoly(outer_coords, hole_coords)
-    
+        if not full_poly.is_valid:
+            print("      Warning: domain boundary is self-intersecting after "
+                  "boundary-layer extrusion — a hole's boundary layers likely "
+                  "overlap the outer wall's (shapes drawn too close together, "
+                  "or n_layers/thickness too large for the gap). The interior "
+                  "mesh may be split or distorted near that overlap.")
+
         # Determine the effective minimum r across all refinement zones so the
         # background grid is fine enough for the densest zone.
         min_r = r
@@ -1052,15 +1073,30 @@ class Mesher:
         # inside_grid — vectorised point-in-polygon via matplotlib Path
         # matplotlib.path.Path.contains_points is a C extension; it handles
         # one polygon ring at a time, so we check the exterior then subtract holes.
+        #
+        # Eroding a polygon-with-holes (safe_zone = full_poly.buffer(-min_r*0.8))
+        # can split the safe interior into disconnected pieces whenever it
+        # pinches to near-zero width somewhere — e.g. a hole drawn close to the
+        # outer wall, so their boundary-layer rings almost touch.  When that
+        # happens Shapely hands back a MultiPolygon instead of a Polygon, so we
+        # iterate over every piece rather than assuming a single exterior ring.
         # ------------------------------------------------------------------
-        ext_coords  = np.array(safe_zone.exterior.coords)
-        ext_path    = Path(ext_coords)
-        inside_flat = ext_path.contains_points(centers)
-    
-        for interior in safe_zone.interiors:
-            hole_path    = Path(np.array(interior.coords))
-            inside_flat &= ~hole_path.contains_points(centers)
-    
+        polys = list(safe_zone.geoms) if safe_zone.geom_type == 'MultiPolygon' else [safe_zone]
+        if len(polys) > 1:
+            print(f"      Note: safe interior zone split into {len(polys)} pieces "
+                  f"(shapes may be close together) — meshing all of them")
+
+        inside_flat = np.zeros(len(centers), dtype=bool)
+        for poly in polys:
+            if poly.is_empty:
+                continue
+            ext_path = Path(np.array(poly.exterior.coords))
+            piece_inside = ext_path.contains_points(centers)
+            for interior in poly.interiors:
+                hole_path      = Path(np.array(interior.coords))
+                piece_inside  &= ~hole_path.contains_points(centers)
+            inside_flat |= piece_inside
+
         inside_grid = inside_flat.reshape(cols, rows)
     
         # ------------------------------------------------------------------
@@ -1072,22 +1108,36 @@ class Mesher:
             radius_grid = np.full((cols, rows), r, dtype=np.float64)
             return inside_grid, radius_grid
     
-        # One pass per zone; track best (most refined / closest) zone per cell.
+        # Two-tier zone priority so nested zones behave as expected (a small,
+        # more-refined zone dominates its own footprint even near its center,
+        # instead of losing to a larger enclosing zone that happens to have a
+        # more negative raw distance-to-boundary there):
+        #   1. Containment tier — if a cell is inside one or more zones, the
+        #      SMALLEST-area containing zone wins, regardless of distance.
+        #   2. Transition tier — cells inside no zone fall back to the nearest
+        #      zone by signed distance (unchanged from before), so the existing
+        #      blend-to-background behavior near zone edges is preserved.
         n_cells          = len(centers)
         best_signed_dist = np.full(n_cells, np.inf, dtype=np.float64)
         best_factor      = np.ones(n_cells,          dtype=np.float64)
         best_buf_mult    = np.full(n_cells, 5.0,     dtype=np.float64)
-    
-        for zone in self.refinement_zones:
+        claimed          = np.zeros(n_cells, dtype=bool)
+
+        zones_by_area = sorted(self.refinement_zones, key=lambda z: z[0].area)
+        zone_cache = []  # (is_inside, signed_dists, safe_factor, buffer_mult), smallest zone first
+
+        # Pass 1 — containment tier, smallest zone first so it claims cells
+        # before any larger enclosing zone gets a chance to.
+        for zone in zones_by_area:
             poly        = zone[0]
             factor      = zone[1]
             buffer_mult = zone[2] if len(zone) == 3 else 5.0
             safe_factor = max(factor, 1.1)
-    
+
             # Vectorised inside check for this zone via matplotlib Path
             zone_path = Path(np.array(poly.exterior.coords))
             is_inside = zone_path.contains_points(centers)   # bool (N,)
-    
+
             # Signed distance: negative inside, positive outside.
             # We approximate boundary distance as distance to the exterior ring,
             # which is exact for convex zones and a good approximation otherwise.
@@ -1099,13 +1149,25 @@ class Mesher:
                 pt = ShapelyPoint(px, py)
                 d  = ext_ring.distance(pt)
                 signed_dists[i] = -d if is_inside[i] else d
-    
-            # Keep the zone that is "closer" (lower signed distance = more inside)
-            better = signed_dists < best_signed_dist
-            best_signed_dist[better] = signed_dists[better]
-            best_factor[better]      = safe_factor
-            best_buf_mult[better]    = buffer_mult
-    
+
+            zone_cache.append((is_inside, signed_dists, safe_factor, buffer_mult))
+
+            newly = is_inside & ~claimed
+            best_signed_dist[newly] = signed_dists[newly]
+            best_factor[newly]      = safe_factor
+            best_buf_mult[newly]    = buffer_mult
+            claimed |= is_inside
+
+        # Pass 2 — transition tier, only for cells no zone contains. Nearest
+        # zone by signed distance wins, reusing the arrays cached in pass 1.
+        unclaimed = ~claimed
+        if unclaimed.any():
+            for is_inside, signed_dists, safe_factor, buffer_mult in zone_cache:
+                better = unclaimed & (signed_dists < best_signed_dist)
+                best_signed_dist[better] = signed_dists[better]
+                best_factor[better]      = safe_factor
+                best_buf_mult[better]    = buffer_mult
+
         # Smoothstep blending — identical formula to _get_local_r
         local_refined = r / best_factor                         # spacing inside zone
         buffer_width  = best_buf_mult * local_refined           # transition band width
