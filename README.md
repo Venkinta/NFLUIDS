@@ -2,6 +2,22 @@
 
 A complete **2D Computational Fluid Dynamics (CFD) pipeline** with an interactive CAD frontend, built entirely in Python. Draw your geometry, assign boundary conditions, generate a hybrid mesh, solve the incompressible Navier-Stokes equations using the SIMPLE algorithm, and visualize results — all in one application.
 
+## Verification
+
+The solver is verified against the analytical plane-Poiseuille solution (ρ=1000 kg/m³, μ=1 Pa·s, H=0.01 m, ū=0.1 m/s prescribed ⇒ dp/dx = −12000 Pa/m):
+
+| Quantity | Error vs analytical |
+|---|---|
+| Pressure gradient dp/dx | **0.11%** |
+| Velocity profile (L2) | **0.26%** |
+| Peak velocity u_max | **0.19%** |
+| Mass conservation | **< 0.05%** |
+| Discrete momentum balance (−dp/dx·H = 2τ_w) | **~1%** |
+
+on a 5,706-cell quad-dominant mesh. Reproduce with the suite in [`validation/`](validation/) (`validate_all`).
+
+**A note on mesh topology:** on hybrid meshes, thin interior triangles meeting the prismatic boundary layer inject a systematic **~+4.5% wall-drag error that does not reduce with refinement** — the error enters at the quad/triangle seam and offsets the whole boundary-layer stack. A 5,706-cell quad-dominant mesh reaches 0.11% dp/dx where a 36,026-cell hybrid mesh reaches only 6.4%. **For wall-bounded flows where wall shear or pressure drop matters, prefer quad-dominant meshes.** See `validation/` for the measurements.
+
 ## Quick Start
 
 ```bash
