@@ -606,15 +606,20 @@ class Mesher:
                 for pt in pts:
                     tri_coords.extend([pt.x, pt.y])
 
-        # Bundle 2: Boundary Layers (Quads)
+        # Bundle 2: Boundary Layers (mostly Quads, but connect_layers also
+        # emits Triangles where a boundary layer pinches at a sharp corner —
+        # see boundary_elements' documented type). Use the polymorphic
+        # .vertices() (both Quad and Triangle implement it) rather than the
+        # Quad-only .points, and build the wireframe from however many
+        # vertices come back. Byte-identical output for Quads.
         quad_coords = []
         if hasattr(self, 'boundary_elements'):
             for q in self.boundary_elements:
-                p = q.points  # FIX: Access the .points list from the Quad class
-                # Store as 4 line segments (8 points)
-                pts = [p[0], p[1], p[1], p[2], p[2], p[3], p[3], p[0]]
-                for pt in pts:
-                    quad_coords.extend([pt.x, pt.y])
+                p = q.vertices()
+                n = len(p)
+                for i in range(n):
+                    a, b = p[i], p[(i + 1) % n]
+                    quad_coords.extend([a.x, a.y, b.x, b.y])
 
         # Bundle 3: The original CAD wall lines
         wall_coords = []

@@ -90,10 +90,14 @@ class PhysicsEditor:
         self.char_length = 1.0 # Default to 1m, 1mm, etc.
 
         # --- Solver Settings (passed to Solver.__init__ and SolverPanel) ---
-        self.alpha_u        = 0.3      # velocity under-relaxation
-        self.alpha_p        = 0.2      # pressure under-relaxation
+        self.alpha_u        = 0.7      # velocity under-relaxation (SIMPLE standard)
+        self.alpha_p        = 0.3      # pressure under-relaxation (SIMPLE standard)
         self.max_iterations = 1600
-        self.tolerance      = 1e-6     # continuity RMS convergence criterion
+        # Continuity convergence criterion, RELATIVE to inlet mass flux since
+        # the 2026-07 solver fixes. 1e-6 was shown to fire while the velocity
+        # profile is still developing (Poiseuille 36k validation); 1e-8 tracks
+        # true convergence.
+        self.tolerance      = 1e-8
         self.viz_interval   = 10       # live field snapshot every N iterations
 
     # ------------------------------------------------------------------
@@ -185,7 +189,7 @@ class PhysicsEditor:
 
         imgui.text("Fluid Properties")
         _, self.density = imgui.input_float("Density [kg/m3]", self.density, step=0.1, format="%.3f")
-        _, self.viscosity = imgui.input_float("Viscosity [Pa*s]", self.viscosity, format="%.3e")
+        _, self.viscosity = imgui.input_float("Dynamic Viscosity [Pa*s]", self.viscosity, format="%.3e")
 
         # --- New Validation Section ---
         imgui.separator()

@@ -159,7 +159,14 @@ Defines `SolverProtocol(ABC)` with four abstract methods: `initialize_conditions
 ### `solver.py` — SIMPLE Algorithm Implementation
 
 Implements `SolverProtocol`. Three surgical changes from the previous synchronous version:
-- `__init__` now accepts `alpha_u`, `alpha_p`, `max_iterations`, `tolerance` as parameters (defaults preserved: `0.3`, `0.2`, `1600`, `1e-6`).
+- `__init__` now accepts `alpha_u`, `alpha_p`, `max_iterations`, `tolerance` as parameters (defaults: `0.7`, `0.3`, `1600`, `1e-8`).
+
+**2026-07 mesh-refinement-divergence fixes** (validated on the Poiseuille 3k–135k mesh series; before the fixes the 36k+ meshes produced 83–1183% dp/dx error, after: sub-1% velocity error and stable convergence):
+- `_face_D()` — single source for the face pressure-velocity coupling coefficient. Interpolates the *cell ratio* `alpha_u·V/a_P` (OpenFOAM rAU-style, "average of ratios") instead of dividing interpolated V by interpolated a_P — the old form broke at the boundary-layer-quad/triangle interface where adjacent cell areas jump 40–70×. `alpha_u` makes it consistent with the relaxed momentum diagonal actually solved; without it the effective pressure relaxation was `alpha_p·alpha_u` (~0.06). Same `alpha_u` factor in `CORRECT_PRESSURE_AND_VELOCITY`.
+- `ASSEMBLE_PRESSURE_CORRECTION` no longer adds diagonal terms for inlet/wall faces (prescribed-flux boundaries contribute nothing to the p' equation; they acted as a spurious p'→0 anchor along every wall). Only the outlet (pressure-Dirichlet) contributes. Safety pins for a no-outlet (cavity) mesh and empty rows reuse `_impose_dirichlet_on_system`.
+- `_lambda_int` clamped to `[1, 5]×` the orthogonal value `|Sf|/|df|` (was unbounded and could go negative on skewed pairs, destroying the p'-matrix M-property); `_T_int` computed after the clamp absorbs the remainder explicitly.
+- `_solve_pressure` falls back to a direct `spsolve` when BiCGSTAB stalls twice, instead of silently accepting the stalled iterate (`_n_pressure_direct` counts fallbacks). pyamg is now a hard dependency so the AMG preconditioner path actually runs.
+- Convergence: `cont_rms` is compared against `tolerance × total inlet mass flux` (relative, mesh-independent). `GET_VAR_STAR` warns loudly when the 5×|U_in| clip fires — a clipped run is untrustworthy.
 - `Solve()` is now a thin ~20-line wrapper around `step()`, kept purely for backward compatibility with any caller that wants a blocking, non-threaded solve.
 - The old loop body became `step(**state)`. It returns the opaque solver state dict (`a_P_u`, `a_P_v`, `initial_cont_rms`, ...) plus the protocol-required `'residuals'`/`'converged'` keys, plus underscore-prefixed raw arrays (`'_b_p'`, `'_r_u'`, `'_r_v'`) that `finalize()` picks up. `finalize(**final_state)` extracts those into `self.final_res_cont` / `self.final_res_mom` (cell-level arrays consumed by `Visualizer`) — the leading underscore avoids colliding with the solver's own state keys. `step()` also refreshes `self._live_res_cont`/`self._live_res_mom` (same `abs(b_p)` / `sqrt(r_u²+r_v²)` formulas as `finalize()`, just computed every iteration instead of once at the end) so the live preview can show Continuity/Momentum Error mid-solve, not just Pressure/Velocity. `field_snapshot` returns `.copy()`'d `U`/`P`/`res_cont`/`res_mom` on every call so the solver thread can't corrupt a snapshot the main thread is still reading.
 
@@ -299,6 +306,35 @@ Both implement the same interface: `vertices()`, `edges()`, `centroid` (property
 
 ### `triangulation.py` — Triangle Container
 O(1) add/remove container backed by a pre-allocated NumPy array. `remove_triangle` uses a `_tri_to_idx` dict (keyed by `id(triangle)`) for O(1) lookup, then swaps the vacated slot with the last row (swap-with-last) so the array stays compact. `coords` property returns a zero-copy view of the live rows — no list conversion, no `np.asarray` copy.
+
+### `mesh_audit.py` (repo root) — Offline Mesh-Integrity Audit
+Standalone CLI (`python mesh_audit.py mesh.npz ...`) that validates a saved solver mesh without running the solver: phantom boundary faces (boundary-tagged faces whose midpoint lies on no CAD line — i.e. holes in the cell fabric mistagged by `solver_data_pipeline`'s nearest-midpoint fallback), per-tag boundary length vs CAD length, per-cell face closure Σ±Sf≈0, non-orthogonality / `lambda_int` sign and magnitude, and `gx` / area-ratio extremes. Exit code 2 if phantom faces are found. Built during the mesh-refinement-divergence investigation (2026-07).
+
+---
+
+## `validation/` — Poiseuille Verification Suite
+
+Analytical verification of the solver against plane Poiseuille flow (ρ=1000, μ=1, H=0.01 m, ū=0.1 m/s prescribed ⇒ dp/dx = −12000 Pa/m, u_max = 0.15 m/s, τ_w = 60 Pa).
+
+**Entry point: `validate_all`.** Prerequisite: run `paraview_export_velocity_poiseuille.py` inside ParaView first — it writes the CSVs *and* `poiseuille_meta.csv` (true cell counts, which the GCI depends on).
+
+**Data location.** `PYTHON_LEARNING/Meshes/Poiseuille/` — deliberately **outside the repo** (~107 MB of regenerable output; keeping it out means it can never be committed). Exactly two places name it, both a single clearly-marked constant: `cfg.data_dir` in `poiseuille_config.m` and `DATA_DIR` in the ParaView script. **There is no path searching and no fallback** — a wrong path stops the run with a named error. (An earlier version searched four candidate directories and silently picked one; besides being able to bind the suite to a stale mesh set, its `raise SystemExit` on no-match *terminated ParaView* when run from the GUI Python Shell, where `__file__` is undefined.)
+
+| File | Role |
+|---|---|
+| `validate_all.m` | **Entry point** — runs the four validators in order. Uses a `run_isolated` helper because `run()` executes in the caller's workspace and the validators reuse `i` as a loop index. |
+| `poiseuille_config.m` | **Single source of truth** — fluid/geometry constants, the *fixed* analytical anchors, ordinal colour ramp, `cfg.data_dir`, and real cell counts read from `poiseuille_meta.csv` (hard error if absent — guessing counts would silently corrupt `h = √(A/N)` and thus the GCI). Edit constants here, never in the scripts. |
+| `read_poiseuille_csv.m` | Robust ParaView-CSV reader; defensive column matching (`Velocity:0`→`Velocity_0`) and mandatory `vtkValidPointMask` filtering. |
+| `validate_poiseuille.m` | Velocity: **absolute** L2 (vs true parabola), **shape** L2 (vs ū-rescaled parabola), mass error, u_max, symmetry, wall shear. |
+| `validate_pressure.m` | dp/dx fitted over the **developed region only**, vs the fixed −12000 Pa/m; linearity R²/RMS. |
+| `validate_gci.m` / `gci_triplet.m` | Grid-convergence study — observed order *p*, Richardson extrapolation, GCI (Roache / ASME V&V 20, Celik et al. 2008). Flags oscillatory/degenerate triplets instead of inventing numbers. |
+| `test_gci.m` | Unit test for `gci_triplet` (14 assertions): recovers p=1.0/1.5/2.0/3.0 from synthetic power-law data at the real non-constant refinement ratios. Self-contained — needs no exported data, so it runs on a bare checkout. |
+| `validate_diagnostics.m` | Mass conservation vs x, entrance length (Chen correlation), and the `ContinuityResidual`/`MomentumResidual` fields. |
+| `paraview_export_velocity_poiseuille.py` | `pvpython` batch export → profile, centreline pressure, centreline u(x), per-station profiles, plus `poiseuille_meta.csv` with true cell counts. |
+
+**The rule this suite exists to enforce:** the analytical solution is anchored to the *prescribed* inlet velocity and is therefore mesh-independent. An earlier version derived ū from the CFD result and rebuilt "theory" from it — circular, and it silently absorbed a +13.6% mass-conservation error into a moving "Theory dp/dx" column. Never re-derive the theory from solver output.
+
+Run from inside `validation/` (or `addpath` it): `validate_all` for everything; `test_gci` to check the GCI maths alone; each validator by name to run just one.
 
 ---
 

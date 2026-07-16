@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import bicgstab, LinearOperator, spilu
+from scipy.sparse.linalg import bicgstab, LinearOperator, spilu, spsolve
 
 from .solver_protocol import SolverProtocol
 
@@ -91,8 +91,8 @@ class Solver(SolverProtocol):
         }
     """
     def __init__(self, mesher_data, inlet_velocity, outlet_pressure, rho, viscosity,
-                 alpha_u: float = 0.3, alpha_p: float = 0.2,
-                 max_iterations: int = 1600, tolerance: float = 1e-6):
+                 alpha_u: float = 0.7, alpha_p: float = 0.3,
+                 max_iterations: int = 1600, tolerance: float = 1e-8):
         # --- Solver parameters (now tunable from PhysicsEditor) ---
         self.alpha_u       = alpha_u   # velocity under-relaxation
         self.alpha_p       = alpha_p   # pressure under-relaxation
@@ -103,7 +103,7 @@ class Solver(SolverProtocol):
         self.inlet_velocity  = np.asarray(inlet_velocity, dtype=np.float64)
         self.outlet_pressure = float(outlet_pressure)
         self.rho             = float(rho)
-        self.viscosity       = float(viscosity) #Moving from dynamic viscosity to kinematic 
+        self.viscosity       = float(viscosity) #Dynamic viscosity
 
         # ---Mesher data: number of cells and faces
         mesh = mesher_data
@@ -141,24 +141,21 @@ class Solver(SolverProtocol):
         print("-------------------------")
 
 
-        # After pipeline in solver __init__, before _precompute_topology:
-        small_cell_area = np.percentile(self.cell_areas, 20)  # bottom 20% = refined cells
-        refined_cells = set(np.where(self.cell_areas < small_cell_area)[0])
-        suspect_faces = [f for f in self.internal_faces 
-                        if self.owner[f] in refined_cells or self.neighbor[f] in refined_cells]
-        mistagged = [f for f in suspect_faces if self.boundary_tags[f] != -1]
-        print(f"Refined-zone internal faces: {len(suspect_faces)}")
-        print(f"Of those, mistagged (not -1): {len(mistagged)}")
-        if mistagged:
-            print(f"  Tags found: {set(self.boundary_tags[f] for f in mistagged)}")
-
-
+        # NOTE: face-tag / mesh-integrity validation lives in mesh_audit.py
+        # (repo root) — run it on the saved .npz whenever a mesh is suspect.
 
         self._precompute_topology()
 
         # Enforce safety floors on geometric metrics post-correction
         self.magDf = np.maximum(self.magDf, 1e-10)
         self.magSf = np.maximum(self.magSf, 1e-10)
+
+        # Continuity-residual scale: total inlet mass flux [kg/(m·s) per unit
+        # depth]. The convergence check compares cont_rms against
+        # tolerance * this scale, so `tolerance` means the same thing on a
+        # 3k mesh and a 135k mesh (absolute per-face fluxes shrink with h).
+        self._mflux_scale = float(np.sum(np.abs(
+            self.rho * np.einsum('fj,j->f', self._Sf_in, self.inlet_velocity)))) or 1.0
 
         # Iterative solver state
         self._precond_cache    = {}
@@ -231,10 +228,23 @@ class Solver(SolverProtocol):
         dot_df_Sf = np.sum(df_int * Sf_int, axis=1)
         dot_Sf_Sf = np.sum(Sf_int * Sf_int, axis=1)
         safe_denom = np.where(np.abs(dot_df_Sf) < 1e-12, 1e-12, dot_df_Sf)
-        
-        # Over-relaxed scaling factor
-        self._lambda_int = dot_Sf_Sf / safe_denom
-        
+
+        # Over-relaxed scaling factor: lambda = |Sf|^2 / (df·Sf) = |Sf|/(|df| cosθ).
+        # For a severely skewed face pair cosθ -> 0 (lambda blows up) or goes
+        # negative (df·Sf <= 0), which would put a NEGATIVE coefficient in the
+        # pressure-correction matrix and destroy its M-matrix property. Clamp
+        # to [1, 5]× the orthogonal value |Sf|/|df|; T_int is computed AFTER
+        # the clamp, so whatever the implicit E component no longer carries is
+        # absorbed by the explicit tangential correction.
+        lambda_raw  = dot_Sf_Sf / safe_denom
+        lambda_orth = np.sqrt(dot_Sf_Sf) / np.maximum(self.magDf[f_int], 1e-10)
+        self._lambda_int = np.clip(lambda_raw, lambda_orth, 5.0 * lambda_orth)
+        n_clamped = int(np.sum(self._lambda_int != lambda_raw))
+        if n_clamped:
+            n_neg = int(np.sum(dot_df_Sf <= 0.0))
+            print(f"  [topology] lambda_int clamped on {n_clamped}/{len(lambda_raw)} "
+                  f"internal faces ({n_neg} with df·Sf <= 0 — severely skewed pairs)")
+
         # Tangential non-orthogonal correction vector components
         self._E_int = self._lambda_int[:, np.newaxis] * df_int
         self._T_int = Sf_int - self._E_int
@@ -358,8 +368,16 @@ class Solver(SolverProtocol):
         if info != 0:
             x, info = bicgstab(A, b, x0=x0, M=M, rtol=1e-2, atol=0.0, maxiter=200)
             if info != 0:
-                print(f"  BiCGSTAB [pressure] stalled (info={info}), "
-                      f"res={np.linalg.norm(A @ x - b):.2e}")
+                # A stalled BiCGSTAB iterate can be arbitrarily wrong while
+                # still finite — feeding it into P += alpha_p*p' silently
+                # corrupts the pressure field. Pay for a direct solve instead.
+                rel_res = (np.linalg.norm(A @ x - b)
+                           / max(np.linalg.norm(b), 1e-300))
+                self._n_pressure_direct = getattr(self, '_n_pressure_direct', 0) + 1
+                print(f"  BiCGSTAB [pressure] stalled (info={info}, "
+                      f"rel_res={rel_res:.2e}) — direct solve fallback "
+                      f"(#{self._n_pressure_direct} this run).")
+                x = spsolve(A.tocsc(), b)
         return x
 
     # ------------------------------------------------------------------
@@ -495,7 +513,11 @@ class Solver(SolverProtocol):
         if iteration % 10 == 0:
             self.health_check(iteration, a_P_u)
 
-        converged = (iteration > 50 and res_cont_rms < self.tolerance)
+        # Relative test: cont_rms scales with per-face mass flux (shrinks with
+        # cell size), so an absolute threshold means different physical
+        # accuracy on every mesh. Normalize by the total inlet mass flux.
+        converged = (iteration > 50 and
+                     res_cont_rms / self._mflux_scale < self.tolerance)
 
         return {
             # --- Persistent solver state (passed back on next call) ---
@@ -537,6 +559,30 @@ class Solver(SolverProtocol):
         }
 
     # ------------------------------------------------------------------
+    # Helper: face-interpolated pressure-velocity coupling coefficient
+    # ------------------------------------------------------------------
+    def _face_D(self, a_P_u, a_P_v):
+        """D_f = interp(alpha_u * V_cell / a_P) on internal faces.
+
+        Two deliberate choices, both load-bearing:
+        1. The RATIO is formed per cell and then interpolated (OpenFOAM's
+           rAU approach). Interpolating V and a_P separately and dividing
+           ("ratio of averages") is badly wrong where adjacent cells differ
+           by a large factor — e.g. the thin boundary-layer-quad /
+           interior-triangle interface, where area ratios reach 40–70x.
+        2. alpha_u: the momentum system actually solved has diagonal
+           a_P/alpha_u (Patankar relaxation), so the pressure-correction
+           and Rhie-Chow coefficients must use that same diagonal.
+           Without it, p' comes out alpha_u-times too small and the
+           effective pressure relaxation is alpha_p*alpha_u (~0.06), not
+           alpha_p.
+        """
+        a_P = np.maximum(0.5 * (a_P_u + a_P_v), 1e-30)
+        D_cell = self.alpha_u * self.cell_areas / a_P
+        return ((1.0 - self._gx_int) * D_cell[self._own_i]
+                + self._gx_int * D_cell[self._nei_i])
+
+    # ------------------------------------------------------------------
     # Helper: consistent Rhie‑Chow flux for arbitrary velocity field
     # ------------------------------------------------------------------
     def _compute_rhie_chow_flux(self, U_2d, a_P_u, a_P_v):
@@ -555,14 +601,9 @@ class Solver(SolverProtocol):
         # Distance-weighted pressure gradient interpolation
         gP_f = (1.0 - self._gx_int)[:, None] * self._last_grad_P[own] + self._gx_int[:, None] * self._last_grad_P[nei]
 
-        # Distance-weighted diagonal matrix coefficients
-        a_P_own = 0.5 * (a_P_u[own] + a_P_v[own])
-        a_P_nei = 0.5 * (a_P_u[nei] + a_P_v[nei])
-        a_P_f = np.maximum((1.0 - self._gx_int) * a_P_own + self._gx_int * a_P_nei, 1e-10)
-
-        # Distance-weighted cell volume/area interpolation
-        vol_f  = (1.0 - self._gx_int) * self.cell_areas[own] + self._gx_int * self.cell_areas[nei]
-        D_f    = vol_f / a_P_f
+        # Face pressure-velocity coupling coefficient (relaxation-consistent,
+        # ratio interpolated per cell — see _face_D)
+        D_f = self._face_D(a_P_u, a_P_v)
 
         # --- NON-ORTHOGONAL RHIE-CHOW GEOMETRY UPDATES ---
         dot_gP_df = np.sum(gP_f * self.df[f_int], axis=1)
@@ -611,14 +652,9 @@ class Solver(SolverProtocol):
         phi_star = self.rho * np.einsum('fj,fj->f', U_interp, self._Sf_int)
 
         if a_P_u is not None:
-            a_P_own = 0.5 * (a_P_u[own] + a_P_v[own])
-            a_P_nei = 0.5 * (a_P_u[nei] + a_P_v[nei])
-            a_P_f = np.maximum((1.0 - self._gx_int) * a_P_own + self._gx_int * a_P_nei, 1e-10)
-            
-            gP_f       = (1.0 - self._gx_int)[:, None] * grad_P[own] + self._gx_int[:, None] * grad_P[nei]
-            vol_f      = (1.0 - self._gx_int) * self.cell_areas[own] + self._gx_int * self.cell_areas[nei]
-            D_f        = vol_f / a_P_f
-            
+            D_f  = self._face_D(a_P_u, a_P_v)
+            gP_f = (1.0 - self._gx_int)[:, None] * grad_P[own] + self._gx_int[:, None] * grad_P[nei]
+
             dot_gP_df  = np.sum(gP_f * self.df[f_int], axis=1)
             dp_actual  = self.P[nei] - self.P[own]
             self.phi[f_int] = phi_star + self.rho * D_f * self._lambda_int * (dot_gP_df - dp_actual)
@@ -704,6 +740,14 @@ class Solver(SolverProtocol):
         u_star = self._solve_momentum(A_mom, b_x, 'mom_u')
         v_star = self._solve_momentum(A_mom, b_y, 'mom_v')
         v_max  = np.linalg.norm(self.inlet_velocity) * 5.0
+        # The clip below keeps a blow-up finite, but it also HIDES it: a
+        # diverging run shows plausible velocities while pressure runs away.
+        # Never trust a result produced while this warning is firing.
+        n_clip = int(np.sum((np.abs(u_star) > v_max) | (np.abs(v_star) > v_max)))
+        if n_clip:
+            print(f"  [step {self._iteration}] WARNING: u* clipped in {n_clip} "
+                  f"cells (|u| > {v_max:.3g} m/s) — solution untrustworthy "
+                  f"while this fires.")
         return np.clip(u_star, -v_max, v_max), np.clip(v_star, -v_max, v_max)
 
     # ------------------------------------------------------------------
@@ -713,28 +757,26 @@ class Solver(SolverProtocol):
         own_i  = self._own_i;  nei_i  = self._nei_i
         own_in = self._own_in; own_out = self._own_out; own_w = self._own_w
 
-        # Precompute the consistent face-centered isotropic velocity coefficient array
-        a_P_own = 0.5 * (a_P_u[own_i] + a_P_v[own_i])
-        a_P_nei = 0.5 * (a_P_u[nei_i] + a_P_v[nei_i])
-        a_P_f   = np.maximum((1.0 - self._gx_int) * a_P_own + self._gx_int * a_P_nei, 1e-10)
-        vol_f   = (1.0 - self._gx_int) * self.cell_areas[own_i] + self._gx_int * self.cell_areas[nei_i]
-        D_f     = vol_f / a_P_f
-        
+        # Face-centered pressure-velocity coupling coefficient (see _face_D)
+        D_f = self._face_D(a_P_u, a_P_v)
+
         # Implicit coefficient matrix data derived from the parallel component (E)
         d_int = self.rho * D_f * self._lambda_int
 
-        # Retain original consistent mapping for boundary cells
-        def _d_bnd(Sf_slice, own):
-            return self.rho * (Sf_slice[:, 0]**2 / np.maximum(a_P_u[own], 1e-10) + 
-                               Sf_slice[:, 1]**2 / np.maximum(a_P_v[own], 1e-10))
-
-        d_in  = _d_bnd(self._Sf_in,  own_in)
-        d_out = _d_bnd(self._Sf_out, own_out)
-        d_w   = _d_bnd(self._Sf_w,   own_w)
+        # Boundary contributions: ONLY pressure-Dirichlet boundaries belong in
+        # this matrix. At the outlet p' = 0 at the face, so the flux correction
+        # -d_out*(0 - p'_P) puts d_out on the diagonal. At the inlet and walls
+        # the mass flux is PRESCRIBED — its correction is identically zero, so
+        # those faces contribute nothing (zero-gradient p'). The d_in/d_w terms
+        # previously added here acted as a spurious "p' -> 0" anchor on every
+        # wall- and inlet-adjacent cell.
+        d_out = self.rho * self.alpha_u * (
+            self._Sf_out[:, 0]**2 / np.maximum(a_P_u[own_out], 1e-10) +
+            self._Sf_out[:, 1]**2 / np.maximum(a_P_v[own_out], 1e-10))
 
         data = np.concatenate([
             d_int, -d_int, d_int, -d_int,
-            d_in, d_out, d_w,
+            np.zeros(len(own_in)), d_out, np.zeros(len(own_w)),
         ])
         A = self._make_csr(self._pcorr_csr, data)
 
@@ -762,6 +804,18 @@ class Solver(SolverProtocol):
         # Outlet
         mass_flux_out = phi_star[self.outlet_faces]
         b -= np.bincount(own_out, weights=mass_flux_out, minlength=self.Nc)
+
+        # With d_in/d_w gone, the matrix is anchored only through d_out. Two
+        # safety pins (both no-ops on a healthy inlet/outlet mesh):
+        #   * no outlet at all (closed cavity)  -> pure-Neumann singular
+        #     system; pin p' = 0 in cell 0 as the reference pressure.
+        #   * a cell whose every face is a prescribed-flux boundary -> empty
+        #     row; pin p' = 0 there (its correction is indeterminate anyway).
+        if len(self.outlet_faces) == 0:
+            self._impose_dirichlet_on_system(A, b, [0], 0.0)
+        empty_rows = np.where(A.diagonal() == 0.0)[0]
+        if len(empty_rows):
+            self._impose_dirichlet_on_system(A, b, empty_rows, 0.0)
 
         return A, b
 
@@ -799,8 +853,10 @@ class Solver(SolverProtocol):
         grad_p_prime = self.calculate_pressure_gradients(is_correction=True)
         self.P = P_tmp
         
-        self.U[:, 0] = u_star -  (self.cell_areas / a_P_u) * grad_p_prime[:, 0]
-        self.U[:, 1] = v_star -  (self.cell_areas / a_P_v) * grad_p_prime[:, 1]
+        # alpha_u for the same reason as in _face_D: the momentum diagonal
+        # actually solved is a_P/alpha_u, so u' = -(V / (a_P/alpha_u)) grad p'.
+        self.U[:, 0] = u_star - (self.alpha_u * self.cell_areas / a_P_u) * grad_p_prime[:, 0]
+        self.U[:, 1] = v_star - (self.alpha_u * self.cell_areas / a_P_v) * grad_p_prime[:, 1]
 
     # ------------------------------------------------------------------
 
@@ -862,8 +918,10 @@ class Solver(SolverProtocol):
             f">4x count: {(area_ratio > 4).sum() + (area_ratio < 0.25).sum()}")
 
         lambda_stats = self._lambda_int
-        print(f"  lambda_int: mean={lambda_stats.mean():.2f}, max={lambda_stats.max():.2f}, "
-            f">10 count: {(lambda_stats > 10).sum()}")
+        print(f"  lambda_int: min={lambda_stats.min():.2f}, "
+            f"mean={lambda_stats.mean():.2f}, max={lambda_stats.max():.2f}, "
+            f">10 count: {(lambda_stats > 10).sum()} "
+            f"(clamped to [1,5]x orthogonal at startup)")
         
         # Split U stats by refined vs coarse cells
         small_area_threshold = np.percentile(self.cell_areas, 30)

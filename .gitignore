@@ -34,3 +34,17 @@ __nbcache__/
 
 # Backup/scratch archives (e.g. manual file-import backups)
 *.zip
+
+# --- Mesh / solver DATA (large binary; NEVER commit) ----------------------
+# The Poiseuille validation set lives OUTSIDE the repo
+# (PYTHON_LEARNING/Meshes/Poiseuille, ~107 MB) -- see DATA_DIR/cfg.data_dir in
+# validation/. These patterns are belt-and-braces against a stray in-repo save.
+# NOTE: the SCRIPTS in validation/ are source and ARE tracked; only data is
+# ignored. Never add validation/ here -- `git clean -xfd` deletes ignored files.
+*.npz
+*.vtu
+
+# Figures / reports emitted by the validation suite
+validation/*.png
+validation/*.pdf
+validation/*.fig

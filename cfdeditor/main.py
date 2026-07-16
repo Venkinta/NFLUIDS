@@ -215,6 +215,7 @@ def run_app():
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 physicseditor.has_mesh = True
                 physicseditor.mesher = mesher
+                physicseditor.loaded_mesh = None  # invalidate stale loaded mesh so Solve uses this fresh remesh
 
             # --- Load saved mesh (.npz) ---
             if physicseditor.load_requested:
