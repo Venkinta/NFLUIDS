@@ -1,14 +1,9 @@
 import numpy as np
+import pyamg
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import bicgstab, LinearOperator, spilu, spsolve
 
 from .solver_protocol import SolverProtocol
-
-try:
-    import pyamg
-    _HAS_PYAMG = True
-except ImportError:
-    _HAS_PYAMG = False
 
 # ---------------------------------------------------------------------------
 # Solver  —  SIMPLE algorithm for incompressible 2-D Navier-Stokes
@@ -345,14 +340,13 @@ class Solver(SolverProtocol):
             'pressure' not in self._precond_cache
         )
         if refresh:
-            if _HAS_PYAMG:
-                try:
-                    ml = pyamg.ruge_stuben_solver(A, coarse_solver='pinv')
-                    self._precond_cache['pressure'] = ml.aspreconditioner()
-                except Exception as exc:
-                    print(f"  PyAMG setup failed ({exc}); falling back to ILU.")
-                    self._precond_cache.pop('pressure', None)
-            if not _HAS_PYAMG or 'pressure' not in self._precond_cache:
+            try:
+                ml = pyamg.ruge_stuben_solver(A, coarse_solver='pinv')
+                self._precond_cache['pressure'] = ml.aspreconditioner()
+            except Exception as exc:
+                print(f"  PyAMG setup failed ({exc}); falling back to ILU.")
+                self._precond_cache.pop('pressure', None)
+            if 'pressure' not in self._precond_cache:
                 try:
                     ilu = spilu(A.tocsc(), fill_factor=8, drop_tol=1e-4)
                     self._precond_cache['pressure'] = LinearOperator(
@@ -681,7 +675,7 @@ class Solver(SolverProtocol):
     def assemble_momentum_both(self):
         f_int   = self.internal_faces
         own_i   = self._own_i;  nei_i   = self._nei_i
-        own_in  = self._own_in; own_w   = self._own_w; own_out = self._own_out
+        own_in  = self._own_in; own_w   = self._own_w
 
         F     = self.phi[f_int]
         D     = self.diff[f_int]
@@ -824,7 +818,6 @@ class Solver(SolverProtocol):
     def _impose_dirichlet_on_system(self, A, b, cells, value):
         if len(cells) == 0:
             return
-        A_diag = A.diagonal()   # view
         for i in cells:
             row_start = A.indptr[i]
             row_end   = A.indptr[i+1]
@@ -909,8 +902,6 @@ class Solver(SolverProtocol):
         print(f"  g_x Mean:   {np.mean(self._gx_int):.4f} (Min: {np.min(self._gx_int):.4f}, Max: {np.max(self._gx_int):.4f})")
         print(f"---------------------------------\n")
         
-        # In health_check(), add:
-        f_int = self.internal_faces
         own, nei = self._own_i, self._nei_i
         area_ratio = self.cell_areas[own] / np.maximum(self.cell_areas[nei], 1e-20)
         print(f"  Cell area ratio (own/nei) at internal faces:")

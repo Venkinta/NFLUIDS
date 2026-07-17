@@ -287,9 +287,8 @@ Standard Bowyer-Watson. Inputs: list of `Point` objects. Outputs: `Triangulation
 
 ### `constructor.py` — Geometry Helpers
 - `create_super_triangle`: scale factor 20 on `dmax`. Safe for normal geometries; could theoretically cause precision issues if input points span many orders of magnitude.
-- `checkCircumcentre`: standard determinant incircle test. Calls `orientCCW` first for consistency.
-- `orientCCW`: mutates the triangle in-place by swapping b/c if CW. **Side effect** — be aware when debugging triangle winding.
-- `intersect`: line-line intersection via Cramér's rule. Used by mesher (imported but check where).
+- `check_circum_bulk`: vectorized (numba `prange`, parallel) determinant incircle test against every candidate triangle at once — the only incircle check left; the old scalar `checkCircumcentre` was removed in v1.7.1 as dead code (superseded, zero call sites).
+- `orientCCW`: mutates the triangle in-place by swapping b/c if CW. **Side effect** — be aware when debugging triangle winding. Called directly by `bowyerwatson.py`.
 
 ---
 
@@ -408,7 +407,7 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 1. **`renderer` singleton** — created once in `main.py`, passed everywhere. Never instantiate `PygameRenderer` in a module.
 2. **Edge key rounding** — the `round(..., 6)` in `get_edge_key()` inside `solver_data_pipeline()`. Change precision and the edge map breaks silently.
 3. **`frozenset` edges** — Triangle and Quad both use frozenset for edges. Changing to tuples breaks all dict lookups.
-4. **`orientCCW` mutation** — `constructor.orientCCW()` mutates the triangle. The Bowyer-Watson loop calls `checkCircumcentre` which calls `orientCCW`. Don't assume triangle vertex order is stable after this.
+4. **`orientCCW` mutation** — `constructor.orientCCW()` mutates the triangle. The Bowyer-Watson loop (`bowyerwatson.py`) calls it directly on the super-triangle and every new triangle. Don't assume triangle vertex order is stable after this.
 5. **`polygon_orientation` sign convention** — Positive = CW in the shoelace convention used here (note: this is *opposite* to the standard mathematical convention where positive area = CCW). The `boundary_layer` normal-flip depends on this.
 6. **`build_polygon` comparison** — Uses `pivot == line.a` (i.e. `Point.__eq__`). `Point.__eq__` now uses a tight tolerance (`math.isclose`, abs_tol=1e-9) so it is robust to small coordinate drift while still treating distinct vertices as distinct. **`Point.__hash__` is intentionally left as the exact coordinate hash** — Bowyer-Watson dedup (`set()` on Points) relies on bit-identical coordinates, so do NOT make `__hash__` tolerance-based.
 7. **`bc_map` string matching** — The strings in `bc_map` in `create_boundary_points()` must exactly match the `boundary_types` list in `physics_editor.py`.
@@ -433,3 +432,10 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 - **Misleading comment** in `editor.py` ("Default to meters") corrected to reflect the actual mm default.
 - **MultiPolygon safe-zone crash** — `_precompute_domain_grids` (`mesher.py:1043`) assumed `full_poly.buffer(-min_r*0.8)` always returned a single `Polygon`. When the eroded interior safe zone splits into disconnected pieces (e.g. a hole's boundary layers nearly touching the outer wall's), Shapely returns a `MultiPolygon` and `.exterior` raised `AttributeError`. Now iterates every piece and meshes all of them; a validity check on the pre-erosion domain polygon also warns when boundary layers actually overlap instead of silently mis-meshing.
 - **Nested refinement-zone priority** — zone overlap used to resolve by raw, unnormalized distance-to-boundary, which let a larger zone win near its own center even where a smaller, more-refined zone was nested inside it. `_get_local_r()` (`mesher.py:261`) and `_precompute_domain_grids()` (`mesher.py:1043`) now use the two-tier containment-by-area rule described in Phase 3 above.
+
+### Resolved technical debt (v1.7.1)
+- **PyAMG silent fallback removed** — `solver.py` used to `try: import pyamg / except ImportError: _HAS_PYAMG = False` and silently use ILU instead of AMG with zero warning if pyamg wasn't installed, despite pyproject.toml already declaring it a hard dependency. `import pyamg` is now unconditional; a missing install now fails loudly at startup instead of quietly degrading solve quality forever.
+- **Silent refinement-zone drop now warns** — `create_steiner_points()` (`mesher.py`) prints a warning when a zone's seed point can't be placed after 100 attempts, instead of silently giving that zone zero targeted refinement.
+- **`filter_triangles()` overlap-check exception now warns** — the `except Exception: pass` around the Shapely intersection call (mesh-filtering edge case) now prints before falling back to the centroid-only check, instead of failing silently.
+- **Dead code removed**: `constructor.checkCircumcentre()` and `constructor.updatebadedges()` (both superseded, zero call sites) plus their now-orphaned JIT kernels `_circum_scalar`/`_cross2d`; `Editor._cancel_or_undo()` (exact duplicate of `_handle_escape()`, never wired); a stray trailing `pass` in `Editor.finish()`; several unused imports across `camera.py`/`line.py`/`triangle.py`/`quad.py`/`bowyerwatson.py`/`editor.py`/`main.py`/`mesher.py`/`physics_editor.py`; unused locals in `solver.py` (`own_out` in `assemble_momentum_both`, `A_diag` in `_impose_dirichlet_on_system`, `f_int` in `health_check`).
+- **`pygame_widgets` dependency dropped** — imported in three files but `Button(...)` was never instantiated anywhere in the repo; removed from `pyproject.toml` along with the dead imports.

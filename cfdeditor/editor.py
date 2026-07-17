@@ -2,9 +2,6 @@ import pygame
 import math
 from .line import Line
 from .snapengine import SnapEngine
-from pygame_widgets.button import Button
-import pygame_widgets
-from .camera import Camera
 from .point import Point
 import imgui
 
@@ -164,13 +161,6 @@ class Editor:
             self.lines.append(new_line)
             self.start_pos = final_pos # Chain to next line
 
-    def _cancel_or_undo(self):
-        if self.is_drawing:
-            self.is_drawing = False
-            self.start_pos = None
-        elif self.lines:
-            self.lines.pop()
-
     def draw(self, screen, camera):
         imgui.new_frame()
         
@@ -258,4 +248,3 @@ class Editor:
             
     def finish(self):
         self.finished = True
-        pass

@@ -1,4 +1,3 @@
-from .camera import Camera
 from .point import Point
 
 class Triangle:

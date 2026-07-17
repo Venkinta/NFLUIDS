@@ -10,17 +10,6 @@ from numba import njit, prange
 # run without the GIL and (for the bulk check) in parallel across cores.
 # ---------------------------------------------------------------------------
 
-@njit(cache=True)
-def _circum_scalar(ax, ay, bx, by, cx, cy):
-    """Scalar circumcircle in-circle test.  Returns True if point is inside."""
-    a2 = ax*ax + ay*ay
-    b2 = bx*bx + by*by
-    c2 = cx*cx + cy*cy
-    det = (a2 * (bx*cy - cx*by)
-         - b2 * (ax*cy - cx*ay)
-         + c2 * (ax*by - bx*ay))
-    return det > 0.0
-
 @njit(parallel=True, cache=True)
 def _check_circum_bulk_core(C, px, py):
     """Parallel bulk circumcircle test.
@@ -51,19 +40,12 @@ def _check_circum_bulk_core(C, px, py):
         result[i] = det > 0.0
     return result
 
-@njit(cache=True)
-def _cross2d(ux, uy, vx, vy):
-    """2-D cross product of two vectors given as scalar components."""
-    return ux * vy - uy * vx
-
 # ---------------------------------------------------------------------------
 # Warm-up: trigger JIT compilation at import time so the first real mesh
 # run pays no compilation overhead.
 # ---------------------------------------------------------------------------
 _warmup_C = np.zeros((1, 6), dtype=np.float64)
 _check_circum_bulk_core(_warmup_C, 0.0, 0.0)
-_circum_scalar(0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
-_cross2d(1.0, 0.0, 0.0, 1.0)
 del _warmup_C
 
 
@@ -85,14 +67,6 @@ def create_super_triangle(points):
     p3 = Point(mid_x, mid_y + 20 * dmax)
 
     return Triangle(p1, p2, p3)
-
-def checkCircumcentre(triangle, point):
-    """Standard determinant-based circumcircle check (delegates math to JIT kernel)."""
-    orientCCW(triangle)
-    ax, ay = triangle.a.x - point.x, triangle.a.y - point.y
-    bx, by = triangle.b.x - point.x, triangle.b.y - point.y
-    cx, cy = triangle.c.x - point.x, triangle.c.y - point.y
-    return bool(_circum_scalar(ax, ay, bx, by, cx, cy))
 
 def check_circum_bulk(coords_list, point):
     """Checks all triangles against one point using the parallel JIT kernel.
@@ -119,6 +93,3 @@ def orientCCW(triangle):
     if cross < 0:
         triangle.b, triangle.c = triangle.c, triangle.b
 
-def updatebadedges(edge_count, triangle):
-    for edge in triangle.edges():
-        edge_count[edge] = edge_count.get(edge, 0) + 1

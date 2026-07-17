@@ -1,4 +1,3 @@
-import pygame
 from OpenGL.GL import *
 import math
 from .point import Point

@@ -1,5 +1,4 @@
 from . import constructor as ct
-from .point import Point
 from .triangle import Triangle
 from .triangulation import Triangulation
 import numpy as np

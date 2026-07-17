@@ -10,12 +10,7 @@ from shapely.geometry import Polygon as ShapelyPoly
 from shapely.geometry import Point as ShapelyPoint
 from .triangle import Triangle
 import time
-import cProfile
-import pstats
-
-
 import imgui
-from imgui.integrations.pygame import PygameRenderer
 
 
 class Mesher:
@@ -430,6 +425,10 @@ class Mesher:
                         found_zone = True
                         break
                 if not found_zone:
+                    print(f"  WARNING: refinement zone at centroid "
+                          f"({centroid[0]:.2f}, {centroid[1]:.2f}) got no seed "
+                          f"point after 100 attempts — it will receive NO "
+                          f"targeted refinement.")
                     continue
     
             gx, gy   = get_grid_coords(seed)
@@ -794,9 +793,13 @@ class Mesher:
                 overlap_area = t_poly.intersection(domain_poly).area
                 if overlap_area < 0.98 * t_poly.area:
                     to_remove.append(t)
-            except Exception:
-                # Fallback to centroid if intersection fails due to topology edge cases
-                pass
+            except Exception as exc:
+                # Shapely intersection failed on a topology edge case; the
+                # centroid check above already passed, so keep the triangle
+                # rather than guess — but say so.
+                print(f"  WARNING: overlap check failed for triangle at "
+                      f"({t.centroid.x:.2f}, {t.centroid.y:.2f}) ({exc}); "
+                      f"keeping it on the centroid-only check.")
 
         for t in to_remove:
             self.triangulation.remove_triangle(t)
