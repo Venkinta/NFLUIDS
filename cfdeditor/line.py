@@ -1,6 +1,4 @@
 from .point import Point
-import pygame
-from .camera import Camera
 import numpy as np
 
 class Line:

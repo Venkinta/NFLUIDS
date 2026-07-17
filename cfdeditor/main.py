@@ -1,13 +1,8 @@
-import math
 from .line import Line
 from .editor import Editor
-from .snapengine import SnapEngine
-from pygame_widgets.button import Button
-import pygame_widgets
 from .mesher import Mesher
 from .solver import Solver
 from .solver_panel import SolverPanel
-from .quad import Quad
 from .camera import Camera
 from .physics_editor import PhysicsEditor
 import pygame

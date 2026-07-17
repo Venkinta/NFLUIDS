@@ -1,8 +1,4 @@
-import pygame
-import math
-from .line import Line
 from .point import Point
-import pygame_widgets
 
 
 class Quad:

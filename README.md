@@ -141,7 +141,7 @@ A live **Solver Monitor** panel shows continuity and momentum RMS residual plots
 |---------|---------|
 | `PyOpenGL` | GPU-accelerated rendering |
 | `pygame` | Windowing and event handling |
-| `imgui` / `pygame_widgets` | UI framework |
+| `imgui` | UI framework |
 | `numpy` | Array computations |
 | `scipy` | Sparse linear algebra (BiCGSTAB, ILU) |
 | `numba` | JIT compilation for hot loops |
