@@ -82,7 +82,3 @@ class Triangulation:
 
         self.triangles.pop()                    # O(1) — removes from end
         self._size -= 1
-
-    def draw(self, screen, camera, color=(0, 0, 255), width=2):
-        for triangle in self.triangles:
-            triangle.draw(screen, camera, color, width)

@@ -138,8 +138,6 @@ class PhysicsEditor:
                 camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
             if 'walls' in vbos:
                 camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
-            if 'loaded' in vbos:
-                camera.draw_vbo(vbos['loaded'][0], vbos['loaded'][1], color=(200, 200, 200))
 
         # --- Draw refinement zone overlays ---
         self._draw_refinement_zones(screen, camera)

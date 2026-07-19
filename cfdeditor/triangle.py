@@ -34,9 +34,3 @@ class Triangle:
 
         return abs(((x2-x1) * (y3-y1) - (y2-y1)*(x3-x1))*0.5)
 
-
-
-    def draw(self, screen, camera, color=(100, 100, 250), width=1):
-            # We pass the list of 3 Point objects directly
-        camera.draw_polygon([self.a, self.b, self.c], screen, color, width)
-
