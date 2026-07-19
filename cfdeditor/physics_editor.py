@@ -127,7 +127,9 @@ class PhysicsEditor:
         return result
 
     # ------------------------------------------------------------------
-    def draw(self, screen, camera, vbos=None, gfx=None):
+    def draw(self, gfx, vbos=None):
+        camera = gfx.camera
+
         # --- Mesh overlay (drawn before imgui so UI sits on top) ---
         if vbos:
             gfx.draw_vbo(vbos.get('triangles'), color=(0, 100, 255))
@@ -135,7 +137,7 @@ class PhysicsEditor:
             gfx.draw_vbo(vbos.get('walls'), color=(255, 255, 255))
 
         # --- Draw refinement zone overlays ---
-        self._draw_refinement_zones(screen, camera)
+        self._draw_refinement_zones(gfx)
 
         u = self._unit_names[self._unit_idx]
 
@@ -161,7 +163,7 @@ class PhysicsEditor:
                 color = (100, 220, 255)  # cyan  = hovered
             else:
                 color = (255, 255, 255)  # white = default
-            line.draw(screen, camera, color=color, width=2)
+            line.draw(gfx, color=color, width=2)
 
         # --- Canvas Hover Tooltip ---
         if hovered_line and not want_mouse:
@@ -410,60 +412,30 @@ class PhysicsEditor:
             imgui.end()
 
     # ------------------------------------------------------------------
-    def _draw_refinement_zones(self, screen, camera):
+    def _draw_refinement_zones(self, gfx):
         """Draw all refinement zone rectangles as semi-transparent overlays."""
-        # Draw existing zones
+        camera = gfx.camera
+
+        # Existing zones: light blue
         for zone in self.refinement_zones:
             x1, y1, x2, y2 = zone['rect']
             rx1, rx2 = min(x1, x2), max(x1, x2)
             ry1, ry2 = min(y1, y2), max(y1, y2)
-            # Semi-transparent fill
-            p1 = camera.to_screen((rx1, ry1))
-            p2 = camera.to_screen((rx2, ry2))
-            # Draw filled rectangle using OpenGL
-            gl_r, gl_g, gl_b = 0.2, 0.6, 1.0  # light blue
-            from OpenGL.GL import glBegin, glEnd, glColor4f, glVertex2f, GL_QUADS, GL_LINE_LOOP, glLineWidth
-            glColor4f(gl_r, gl_g, gl_b, 0.15)
-            glBegin(GL_QUADS)
-            glVertex2f(p1[0], p1[1])
-            glVertex2f(p2[0], p1[1])
-            glVertex2f(p2[0], p2[1])
-            glVertex2f(p1[0], p2[1])
-            glEnd()
-            # Outline
-            glColor4f(gl_r, gl_g, gl_b, 0.6)
-            glLineWidth(2)
-            glBegin(GL_LINE_LOOP)
-            glVertex2f(p1[0], p1[1])
-            glVertex2f(p2[0], p1[1])
-            glVertex2f(p2[0], p2[1])
-            glVertex2f(p1[0], p2[1])
-            glEnd()
+            gfx.draw_rect(camera.to_screen((rx1, ry1)),
+                          camera.to_screen((rx2, ry2)),
+                          fill_rgba=(0.2, 0.6, 1.0, 0.15),
+                          outline_rgba=(0.2, 0.6, 1.0, 0.6))
 
-        # Draw the in-progress rectangle while dragging
+        # The in-progress rectangle while dragging: green
         if self._drawing_refinement and self._refine_start is not None and self._refine_current is not None:
             x1, y1 = self._refine_start.x, self._refine_start.y
             x2, y2 = self._refine_current.x, self._refine_current.y
             rx1, rx2 = min(x1, x2), max(x1, x2)
             ry1, ry2 = min(y1, y2), max(y1, y2)
-            p1 = camera.to_screen((rx1, ry1))
-            p2 = camera.to_screen((rx2, ry2))
-            from OpenGL.GL import glBegin, glEnd, glColor4f, glVertex2f, GL_QUADS, GL_LINE_LOOP, glLineWidth
-            glColor4f(0.2, 1.0, 0.2, 0.12)
-            glBegin(GL_QUADS)
-            glVertex2f(p1[0], p1[1])
-            glVertex2f(p2[0], p1[1])
-            glVertex2f(p2[0], p2[1])
-            glVertex2f(p1[0], p2[1])
-            glEnd()
-            glColor4f(0.2, 1.0, 0.2, 0.8)
-            glLineWidth(2)
-            glBegin(GL_LINE_LOOP)
-            glVertex2f(p1[0], p1[1])
-            glVertex2f(p2[0], p1[1])
-            glVertex2f(p2[0], p2[1])
-            glVertex2f(p1[0], p2[1])
-            glEnd()
+            gfx.draw_rect(camera.to_screen((rx1, ry1)),
+                          camera.to_screen((rx2, ry2)),
+                          fill_rgba=(0.2, 1.0, 0.2, 0.12),
+                          outline_rgba=(0.2, 1.0, 0.2, 0.8))
 
     # ------------------------------------------------------------------
     def handle_event(self, event, camera):
