@@ -1,6 +1,6 @@
 from .editor import Editor
 from .camera import Camera
-from .renderer import Renderer
+from .renderer import Renderer, logo_overlay
 from .app_state import AppContext, EVENT_HANDLERS, UPDATE_HANDLERS, RENDER_HANDLERS
 import pygame
 import OpenGL
@@ -36,6 +36,7 @@ def run_app():
 
     camera = Camera()
     gfx = Renderer(camera, renderer, screen)
+    gfx.add_overlay(logo_overlay)
 
     ctx = AppContext(
         screen=screen,
