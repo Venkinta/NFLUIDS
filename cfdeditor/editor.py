@@ -161,7 +161,8 @@ class Editor:
             self.lines.append(new_line)
             self.start_pos = final_pos # Chain to next line
 
-    def draw(self, screen, camera):
+    def draw(self, gfx):
+        camera = gfx.camera
         imgui.set_next_window_position(50, 50, imgui.ALWAYS)
         imgui.begin("Controls", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_ALWAYS_AUTO_RESIZE)
         
@@ -190,7 +191,7 @@ class Editor:
 
         # 3. Draw your CAD lines (World Space)
         for line in self.lines:
-            line.draw(screen, camera)
+            line.draw(gfx)
 
         if self.is_drawing and self.start_pos:
             world_mouse = camera.screen_to_world(self.current_mouse_pos)
@@ -207,8 +208,8 @@ class Editor:
             p1_screen = camera.to_screen(self.start_pos)
             p2_screen = camera.to_screen(target_world_pos)
             
-            camera.draw_screen_line(screen, p1_screen, p2_screen, (150, 150, 150), 1)
-            camera.draw_circle(screen, (0, 255, 0), p2_screen, 3, 1)
+            gfx.draw_screen_line(p1_screen, p2_screen, (150, 150, 150), 1)
+            gfx.draw_circle(p2_screen, 3, (0, 255, 0), 1)
 
             # --- FIXED SECTION: Use .x and .y instead of [0] and [1] ---
             dx = target_world_pos.x - self.start_pos.x

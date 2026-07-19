@@ -13,9 +13,8 @@ class Line:
         self.v_val = 0.0
         self.p_val = 0.0
         
-    def draw(self, screen, camera, color=(255, 255, 255), width=1):
-        # Corrected method name
-        camera.draw_line(screen, self, color, width)
+    def draw(self, gfx, color=(255, 255, 255), width=1):
+        gfx.draw_world_line(self.a, self.b, color, width)
         
     @property   
     def vector(self):

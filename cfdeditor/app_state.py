@@ -290,11 +290,11 @@ UPDATE_HANDLERS = {
 # ----------------------------------------------------------------------
 
 def render_editor(ctx, dt):
-    ctx.editor.draw(ctx.screen, ctx.camera)
+    ctx.editor.draw(ctx.gfx)
 
 
 def render_physics(ctx, dt):
-    ctx.physicseditor.draw(ctx.screen, ctx.camera, ctx.vbos, gfx=ctx.gfx)
+    ctx.physicseditor.draw(ctx.gfx, ctx.vbos)
 
 
 def render_solving(ctx, dt):

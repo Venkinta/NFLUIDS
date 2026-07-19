@@ -23,6 +23,7 @@ pre-transform points on the CPU via ``camera.to_screen()``, while VBO
 draws push the camera as a GL modelview matrix. Merging them risks
 subtle pixel drift at high zoom for zero user value.
 """
+import math
 from contextlib import contextmanager
 
 import pygame
@@ -101,6 +102,61 @@ class Renderer:
     def add_overlay(self, fn):
         """Register fn() to be called every frame, in every state."""
         self._overlays.append(fn)
+
+    # ------------------------------------------------------------------
+    # Immediate-mode primitives (CPU to_screen path, screen-space pixels).
+    # Line/circle colors are 0-255 RGB; draw_rect takes 0-1 RGBA because
+    # its fills rely on alpha blending (GL_BLEND is enabled at init).
+    # ------------------------------------------------------------------
+
+    def draw_screen_line(self, p0, p1, color=(255, 255, 255), width=1):
+        """Line between two screen-space (pixel) points."""
+        r, g, b = [c / 255.0 for c in color]
+        glLineWidth(width)
+        glBegin(GL_LINES)
+        glColor3f(r, g, b)
+        glVertex2f(p0[0], p0[1])
+        glVertex2f(p1[0], p1[1])
+        glEnd()
+
+    def draw_world_line(self, a, b, color=(255, 255, 255), width=1):
+        """Line between two world-space points (Point or (x, y))."""
+        self.draw_screen_line(self.camera.to_screen(a),
+                              self.camera.to_screen(b), color, width)
+
+    def draw_circle(self, center, radius, color, width=1):
+        """Outline circle, screen-space center and pixel radius."""
+        r, g, b = [c / 255.0 for c in color]
+        glColor3f(r, g, b)
+        glLineWidth(width)
+        glBegin(GL_LINE_LOOP)
+        for i in range(32):
+            angle = 2 * math.pi * i / 32
+            glVertex2f(center[0] + math.cos(angle) * radius,
+                       center[1] + math.sin(angle) * radius)
+        glEnd()
+
+    def draw_rect(self, p1, p2, fill_rgba=None, outline_rgba=None,
+                  outline_width=2):
+        """Axis-aligned rectangle between screen-space corners p1 and p2,
+        with optional translucent fill and/or outline (0-1 RGBA)."""
+        if fill_rgba is not None:
+            glColor4f(*fill_rgba)
+            glBegin(GL_QUADS)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
+        if outline_rgba is not None:
+            glColor4f(*outline_rgba)
+            glLineWidth(outline_width)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(p1[0], p1[1])
+            glVertex2f(p2[0], p1[1])
+            glVertex2f(p2[0], p2[1])
+            glVertex2f(p1[0], p2[1])
+            glEnd()
 
     # ------------------------------------------------------------------
     # VBO draws (world space via the GL modelview matrix)
