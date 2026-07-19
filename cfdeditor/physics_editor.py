@@ -127,15 +127,12 @@ class PhysicsEditor:
         return result
 
     # ------------------------------------------------------------------
-    def draw(self, screen, camera, vbos=None):
+    def draw(self, screen, camera, vbos=None, gfx=None):
         # --- Mesh overlay (drawn before imgui so UI sits on top) ---
         if vbos:
-            if 'triangles' in vbos:
-                camera.draw_vbo(vbos['triangles'][0], vbos['triangles'][1], color=(0, 100, 255))
-            if 'quads' in vbos:
-                camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
-            if 'walls' in vbos:
-                camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
+            gfx.draw_vbo(vbos.get('triangles'), color=(0, 100, 255))
+            gfx.draw_vbo(vbos.get('quads'), color=(0, 255, 100))
+            gfx.draw_vbo(vbos.get('walls'), color=(255, 255, 255))
 
         # --- Draw refinement zone overlays ---
         self._draw_refinement_zones(screen, camera)

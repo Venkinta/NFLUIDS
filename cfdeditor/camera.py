@@ -76,21 +76,3 @@ class Camera:
     def remove_gl_transform(self):
         """Pops the camera transform off the stack."""
         glPopMatrix()
-
-    def draw_vbo(self, vbo_id, vertex_count, color=(100, 255, 100), mode=GL_LINES):
-        """Draws a VBO using high-performance line rendering."""
-        r, g, b = [c/255.0 for c in color]
-        glColor3f(r, g, b)
-
-        self.apply_gl_transform()
-
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-        glVertexPointer(2, GL_FLOAT, 0, None)
-
-        # Use the provided mode (GL_LINES for wireframe)
-        glDrawArrays(mode, 0, vertex_count)
-        
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        self.remove_gl_transform()

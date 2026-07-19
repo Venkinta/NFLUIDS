@@ -8,6 +8,7 @@ from .quad import Quad
 from shapely.geometry import Polygon as ShapelyPoly
 from shapely.geometry import Point as ShapelyPoint
 from .triangle import Triangle
+from .renderer import VboHandle
 import time
 from OpenGL.GL import *
 
@@ -604,23 +605,21 @@ class Mesher:
     @staticmethod
     def upload_wireframe_bundles(old_vbos, bundles):
         """Delete `old_vbos`' GL buffers and upload `bundles`
-        (key -> (float32 coords array, point count)) as new VBOs.
+        (key -> (float32 coords array, point count)) as new VboHandles.
 
         Shared by the live-mesh path (rebuild_wireframe_vbos, below) and
-        the loaded-.npz path in main.py's _apply_loaded_mesh_settings,
+        the loaded-.npz path in app_state's _apply_loaded_mesh_settings,
         which builds its own bundles dict from stored cell data since it
         has no live Mesher/triangulation to call get_render_data() on.
         """
-        for vbo_id, _ in old_vbos.values():
-            glDeleteBuffers(1, [vbo_id])
+        for handle in old_vbos.values():
+            handle.delete()
         new_vbos = {}
         for key, (data, count) in bundles.items():
             if count > 0:
-                vbo_id = glGenBuffers(1)
-                glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-                glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
-                new_vbos[key] = (vbo_id, count)
+                handle = VboHandle(components=2)
+                handle.upload(data)
+                new_vbos[key] = handle
         return new_vbos
 
     def rebuild_wireframe_vbos(self, old_vbos):

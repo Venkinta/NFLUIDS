@@ -23,11 +23,54 @@ pre-transform points on the CPU via ``camera.to_screen()``, while VBO
 draws push the camera as a GL modelview matrix. Merging them risks
 subtle pixel drift at high zoom for zero user value.
 """
+from contextlib import contextmanager
+
 import pygame
 import imgui
 from OpenGL.GL import *
 
 from . import __version__
+
+
+class VboHandle:
+    """One GL array buffer with a uniform create/upload/delete lifecycle.
+
+    components: floats per vertex (2 = xy positions, 3 = rgb colors).
+    A class-level registry lets main.py free everything at shutdown via
+    delete_all() — previously buffers were only ever reclaimed as a side
+    effect of the next rebuild.
+    """
+    _live = []
+
+    def __init__(self, components=2, usage=GL_STATIC_DRAW):
+        self.components = components
+        self.usage = usage
+        self.id = None
+        self.count = 0          # vertices in the last upload
+
+    def upload(self, data):
+        """Upload a flat float32 array (allocates the GL buffer on first use)."""
+        if self.id is None:
+            self.id = glGenBuffers(1)
+            VboHandle._live.append(self)
+        glBindBuffer(GL_ARRAY_BUFFER, self.id)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, self.usage)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.count = data.size // self.components
+
+    def delete(self):
+        """Free the GL buffer. Safe to call twice."""
+        if self.id is not None:
+            glDeleteBuffers(1, [self.id])
+            if self in VboHandle._live:
+                VboHandle._live.remove(self)
+            self.id = None
+            self.count = 0
+
+    @classmethod
+    def delete_all(cls):
+        for handle in list(cls._live):
+            handle.delete()
 
 
 class Renderer:
@@ -58,6 +101,38 @@ class Renderer:
     def add_overlay(self, fn):
         """Register fn() to be called every frame, in every state."""
         self._overlays.append(fn)
+
+    # ------------------------------------------------------------------
+    # VBO draws (world space via the GL modelview matrix)
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def _world_transform(self):
+        glPushMatrix()
+        glScalef(self.camera.scale, self.camera.scale, 1.0)
+        glTranslatef(self.camera.offset[0], self.camera.offset[1], 0.0)
+        try:
+            yield
+        finally:
+            glPopMatrix()
+
+    def draw_vbo(self, handle, color=(100, 255, 100), mode=GL_LINES,
+                 point_size=None):
+        """Draw a position-only VboHandle (2 floats/vertex) in one flat
+        color (0-255 RGB). mode: GL_LINES, GL_POINTS, ..."""
+        if handle is None or handle.id is None or handle.count == 0:
+            return
+        r, g, b = [c / 255.0 for c in color]
+        glColor3f(r, g, b)
+        if point_size is not None:
+            glPointSize(point_size)
+        with self._world_transform():
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, handle.id)
+            glVertexPointer(2, GL_FLOAT, 0, None)
+            glDrawArrays(mode, 0, handle.count)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDisableClientState(GL_VERTEX_ARRAY)
 
 
 def logo_overlay():
