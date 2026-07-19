@@ -88,7 +88,7 @@ CASES = [
 
     ("SOLVING stays SOLVING while running",
      update_solving,
-     _ctx(solver_panel=SimpleNamespace(finished=False)),
+     _ctx(solver_panel=SimpleNamespace(finished=False, viz_snapshot=None)),
      AppState.SOLVING),
 
     ("SOLVING -> VISUALIZER when solver_panel finished",
