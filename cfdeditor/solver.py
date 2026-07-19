@@ -3,7 +3,7 @@ import pyamg
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import bicgstab, LinearOperator, spilu, spsolve
 
-from .solver_protocol import SolverProtocol
+from .solver_protocol import SolverProtocol, SolverResults
 
 # ---------------------------------------------------------------------------
 # Solver  —  SIMPLE algorithm for incompressible 2-D Navier-Stokes
@@ -551,6 +551,16 @@ class Solver(SolverProtocol):
             'res_cont': self._live_res_cont.copy(),
             'res_mom':  self._live_res_mom.copy(),
         }
+
+    @property
+    def results(self) -> SolverResults:
+        """SolverProtocol: final post-solve fields, valid after finalize()."""
+        return SolverResults(
+            U=self.U,
+            P=self.P,
+            res_cont=self.final_res_cont,
+            res_mom=self.final_res_mom,
+        )
 
     # ------------------------------------------------------------------
     # Helper: face-interpolated pressure-velocity coupling coefficient
