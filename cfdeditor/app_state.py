@@ -34,6 +34,7 @@ class AppContext:
     renderer: object
     camera: object
     editor: object
+    gfx: object = None             # Renderer — owns frame lifecycle + shared GL draws
     state: AppState = AppState.EDITOR
     vbos: dict = field(default_factory=dict)
     physicseditor: object = None

@@ -334,8 +334,6 @@ class Visualizer:
             self.smoke.draw(camera)
 
         # --- UI and Probing ---
-        imgui.new_frame()
-        
         # Point Probe Logic
         if not imgui.get_io().want_capture_mouse:
             m_pos = pygame.mouse.get_pos()
@@ -392,6 +390,3 @@ class Visualizer:
         if imgui.button("Export VTU", width=-1, height=30): self.open_export_vtu_dialog()
         if imgui.button("Back to Physics", width=-1, height=30): self.finished = True
         imgui.end()
-        
-        imgui.render()
-        self.renderer.render(imgui.get_draw_data())
