@@ -4,6 +4,7 @@ import imgui
 import numpy as np
 from scipy.spatial import cKDTree # Efficient spatial searching
 from .smoke_particles import SmokeParticles
+from .renderer import VboHandle
 
 class Visualizer:
     def __init__(self, renderer, mesher, P, U, res_cont=None, res_mom=None, mesh_data=None):
@@ -32,12 +33,10 @@ class Visualizer:
         self.vector_scale = 1
         self.vector_color = (1.0, 1.0, 1.0)
 
-        # GPU Buffer IDs
-        self.pos_vbo = glGenBuffers(1)
-        self.color_vbo = glGenBuffers(1)
-        self.vector_vbo = glGenBuffers(1)
-        self.vertex_count = 0
-        self.vector_vertex_count = 0
+        # GPU buffers (positions are static; colors/vectors re-upload on change)
+        self.pos_vbo = VboHandle(components=2)
+        self.color_vbo = VboHandle(components=3, usage=GL_DYNAMIC_DRAW)
+        self.vector_vbo = VboHandle(components=2, usage=GL_DYNAMIC_DRAW)
 
         # Spatial Indexing Data
         self.centroids = []
@@ -104,11 +103,7 @@ class Visualizer:
 
         v_array = np.array(vertices, dtype=np.float32)
         self.centroids = np.array(centroids, dtype=np.float32)
-        self.vertex_count = len(v_array)
-
-        glBindBuffer(GL_ARRAY_BUFFER, self.pos_vbo)
-        glBufferData(GL_ARRAY_BUFFER, v_array.nbytes, v_array, GL_STATIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.pos_vbo.upload(v_array)
 
     def _is_point_in_cell(self, px, py, cell):
         """Checks if point (px, py) is inside a convex polygon, regardless of winding.
@@ -144,10 +139,7 @@ class Visualizer:
         vector_lines = np.empty((len(self.centroids) * 2, 2), dtype=np.float32)
         vector_lines[0::2] = self.centroids
         vector_lines[1::2] = endpoints
-        self.vector_vertex_count = len(vector_lines)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vector_vbo)
-        glBufferData(GL_ARRAY_BUFFER, vector_lines.nbytes, vector_lines, GL_DYNAMIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.vector_vbo.upload(vector_lines)
 
     def update_vbo_colors(self):
         """Maps physical fields or mathematical log-scaled residuals to vertex colors."""
@@ -191,10 +183,7 @@ class Visualizer:
         
         rgb = np.stack([r, g, b], axis=1).astype(np.float32)
         expanded_colors = np.repeat(rgb, self.cell_vertex_counts, axis=0)
-        
-        glBindBuffer(GL_ARRAY_BUFFER, self.color_vbo)
-        glBufferData(GL_ARRAY_BUFFER, expanded_colors.nbytes, expanded_colors, GL_DYNAMIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.color_vbo.upload(expanded_colors)
 
     def update_fields(self, P, U, res_cont=None, res_mom=None):
         """Swap in new field data (e.g. a live solve snapshot or the final
@@ -211,7 +200,9 @@ class Visualizer:
     def destroy(self):
         """Free GPU buffers. Call before dropping the last reference,
         since a re-solve allocates a brand-new Visualizer/live preview."""
-        glDeleteBuffers(3, [self.pos_vbo, self.color_vbo, self.vector_vbo])
+        self.pos_vbo.delete()
+        self.color_vbo.delete()
+        self.vector_vbo.delete()
         self.smoke.destroy()
 
     def restore_display_settings(self, data):
@@ -295,49 +286,32 @@ class Visualizer:
                 res_cont=self.res_cont, res_mom=self.res_mom,
             )
 
-    def draw_geometry(self, camera):
+    def draw_geometry(self, gfx):
         """Just the colored mesh fill — no ImGui overlay. Used both by the
         full post-processor draw() below and by the live solve preview."""
-        camera.apply_gl_transform()
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glEnableClientState(GL_COLOR_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, self.pos_vbo)
-        glVertexPointer(2, GL_FLOAT, 0, None)
-        glBindBuffer(GL_ARRAY_BUFFER, self.color_vbo)
-        glColorPointer(3, GL_FLOAT, 0, None)
-        glDrawArrays(GL_TRIANGLES, 0, self.vertex_count)
-        glDisableClientState(GL_COLOR_ARRAY)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        camera.remove_gl_transform()
+        gfx.draw_vbo_colored(self.pos_vbo, self.color_vbo)
 
-    def draw(self, screen, camera, dt):
+    def draw(self, gfx, dt):
         if self.var_idx != self.last_var_idx:
             self.update_vbo_colors()
             self.last_var_idx = self.var_idx
 
-        self.draw_geometry(camera)
+        self.draw_geometry(gfx)
 
         if self.show_vectors:
-            camera.apply_gl_transform()
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glColor3f(*self.vector_color)
-            glBindBuffer(GL_ARRAY_BUFFER, self.vector_vbo)
-            glVertexPointer(2, GL_FLOAT, 0, None)
-            glDrawArrays(GL_LINES, 0, self.vector_vertex_count)
-            glDisableClientState(GL_VERTEX_ARRAY)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            camera.remove_gl_transform()
+            gfx.draw_vbo(self.vector_vbo,
+                         color=tuple(c * 255 for c in self.vector_color),
+                         mode=GL_LINES)
 
         if self.show_particles:
             self.smoke.step(dt)
-            self.smoke.draw(camera)
+            self.smoke.draw(gfx)
 
         # --- UI and Probing ---
         # Point Probe Logic
         if not imgui.get_io().want_capture_mouse:
             m_pos = pygame.mouse.get_pos()
-            world_m = camera.screen_to_world(m_pos)
+            world_m = gfx.camera.screen_to_world(m_pos)
             
             dist, indices = self.tree.query([world_m.x, world_m.y], k=5)
             

@@ -308,13 +308,13 @@ def render_solving(ctx, dt):
                                      res_mom=snap.get('res_mom'))
         ctx.live_field.update_vbo_colors()
 
-    ctx.live_field.draw_geometry(ctx.camera)
+    ctx.live_field.draw_geometry(ctx.gfx)
     ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
     ctx.solver_panel.draw(ctx.screen, ctx.camera, live_field=ctx.live_field)
 
 
 def render_visualizer(ctx, dt):
-    ctx.visualizer.draw(ctx.screen, ctx.camera, dt)
+    ctx.visualizer.draw(ctx.gfx, dt)
 
 
 RENDER_HANDLERS = {
