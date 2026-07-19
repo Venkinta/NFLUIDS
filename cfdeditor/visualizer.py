@@ -48,6 +48,12 @@ class Visualizer:
         # Build the KDTree for the probe
         self.tree = cKDTree(self.centroids)
 
+        # Color VBO must be valid from frame 1: the live SOLVING preview
+        # draws every frame starting immediately (seeded with zero fields),
+        # before update_vbo_colors() is next called from a var-idx change
+        # or the first solver snapshot.
+        self.update_vbo_colors()
+
         self.show_particles = False
         self.smoke = SmokeParticles(owner=self)
 
