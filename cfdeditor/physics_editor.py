@@ -1,5 +1,6 @@
 import pygame
 import imgui
+from enum import Enum, auto
 from .line import Line
 from .point import Point
 import math
@@ -10,15 +11,24 @@ from shapely.geometry import Polygon as ShapelyPoly
 _UNIT_FACTORS = {"mm": 0.001, "cm": 0.01, "m": 1.0}
 
 
+class PhysicsAction(Enum):
+    """A one-shot intent raised by a PHYSICS-state UI action, read and
+    cleared by main.py's PHYSICS transition handling. Replaces four
+    independent request booleans so at most one action is ever pending."""
+    MESH = auto()
+    LOAD_MESH = auto()
+    LOAD_VISUALIZATION = auto()
+    SOLVE = auto()
+
+
 class PhysicsEditor:
 
     def __init__(self, screen, lines, renderer, initial_unit_idx=0):
         self.lines = lines
         self.renderer = renderer
 
-        # Meshing / solving intent flags (read and reset by main.py)
-        self.mesh_requested = False
-        self.solve_requested = False
+        # Meshing / solving intent (read and cleared by main.py)
+        self.pending_action = None  # Optional[PhysicsAction]
         self.has_mesh = False
 
         # Reference to the Mesher instance (set by main.py after meshing) so
@@ -27,13 +37,11 @@ class PhysicsEditor:
 
         # Loaded-mesh handoff: when a .npz is loaded, main.py consumes this
         # dict and skips the meshing step entirely.
-        self.load_requested = False
         self.loaded_mesh = None
 
         # Loaded-visualization handoff: like loaded_mesh, but the .npz also
         # carries solved fields (P/U/...), so main.py jumps straight to the
         # VISUALIZER state instead of landing in PHYSICS for a re-solve.
-        self.load_visualization_requested = False
         self.loaded_visualization = None
 
         # --- Fluid Properties (always SI) ---
@@ -361,11 +369,11 @@ class PhysicsEditor:
         imgui.separator()
         mesh_label = "Remesh" if self.has_mesh else "Mesh"
         if imgui.button(mesh_label):
-            self.mesh_requested = True
+            self.pending_action = PhysicsAction.MESH
         if self.has_mesh:
             imgui.same_line()
             if imgui.button("Solve"):
-                self.solve_requested = True
+                self.pending_action = PhysicsAction.SOLVE
         imgui.same_line()
         if imgui.button("Save Mesh"):
             self.open_save_dialog()
@@ -575,7 +583,7 @@ class PhysicsEditor:
         if filepath:
             print(f"[UI] User selected load path: {filepath}")
             self.loaded_mesh = meshIO.load_mesh_for_solver(filepath)
-            self.load_requested = True
+            self.pending_action = PhysicsAction.LOAD_MESH
             self.selected_line = None  # Reset selection to avoid crash on stale line object
 
     def open_load_visualization_dialog(self):
@@ -605,5 +613,5 @@ class PhysicsEditor:
                 print("[UI] File has no solved fields — use Load Mesh instead.")
                 return
             self.loaded_visualization = data
-            self.load_visualization_requested = True
+            self.pending_action = PhysicsAction.LOAD_VISUALIZATION
             self.selected_line = None  # Reset selection to avoid crash on stale line object
