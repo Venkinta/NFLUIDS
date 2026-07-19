@@ -23,9 +23,8 @@ class PhysicsAction(Enum):
 
 class PhysicsEditor:
 
-    def __init__(self, screen, lines, renderer, initial_unit_idx=0):
+    def __init__(self, lines, initial_unit_idx=0):
         self.lines = lines
-        self.renderer = renderer
 
         # Meshing / solving intent (read and cleared by main.py)
         self.pending_action = None  # Optional[PhysicsAction]

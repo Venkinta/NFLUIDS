@@ -30,14 +30,13 @@ class SolverPanel:
     Open Visualizer — available when DONE or PAUSED; commits result and exits.
     """
 
-    def __init__(self, solver: SolverProtocol, renderer,
+    def __init__(self, solver: SolverProtocol,
                  max_iterations: int = 1600,
                  viz_interval: int = 10):
         assert isinstance(solver, SolverProtocol), \
             "solver must implement SolverProtocol (initialize, step, finalize, field_snapshot)"
 
         self.solver          = solver
-        self.renderer        = renderer
         self.max_iterations  = max_iterations
         self.viz_interval    = viz_interval
 
@@ -280,7 +279,7 @@ class SolverPanel:
     # ImGui draw — called every frame by main.py in the SOLVING state
     # ------------------------------------------------------------------
 
-    def draw(self, screen, camera, live_field=None):
+    def draw(self, live_field=None):
         """live_field: optional live-preview Visualizer (has .vars/.var_idx/
         update_vbo_colors()) — if given, a "Show" combo lets the user switch
         which field is painted on the mesh while solving. Kept optional so

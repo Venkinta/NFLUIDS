@@ -39,11 +39,9 @@ def run_app():
     gfx.add_overlay(logo_overlay)
 
     ctx = AppContext(
-        screen=screen,
-        renderer=renderer,
         camera=camera,
         gfx=gfx,
-        editor=Editor(screen, renderer),
+        editor=Editor(),
     )
     running = True
 

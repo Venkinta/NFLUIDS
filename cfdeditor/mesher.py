@@ -14,7 +14,7 @@ from OpenGL.GL import *
 
 
 class Mesher:
-    def __init__(self, screen, lines, n_layers, growth_factor, thickness, spacing, r, RENDERER,
+    def __init__(self, lines, n_layers, growth_factor, thickness, spacing, r,
                  unit_to_meters=0.001, refinement_zones=None, bc_spacing_map=None):
         """
         unit_to_meters: conversion factor from world-units (CAD coords) to SI metres.
@@ -53,8 +53,6 @@ class Mesher:
 
         # Refinement zones: list of (shapely_polygon, factor)
         self.refinement_zones = refinement_zones if refinement_zones is not None else []
-
-        self.renderer = RENDERER
 
     def mesh(self):
         t_total = time.perf_counter()

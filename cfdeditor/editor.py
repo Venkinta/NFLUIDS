@@ -7,14 +7,12 @@ import imgui
 
 
 class Editor:
-    def __init__(self, screen, renderer):
+    def __init__(self):
         self.lines = []
         self.snap_engine = SnapEngine(pixel_radius=10)
         self.is_drawing = False
-        self.start_pos = None  
+        self.start_pos = None
         self.current_mouse_pos = (0, 0)
-        self.screen = screen
-        self.renderer = renderer
         self.finished = False
         
         # --- NEW CAD STATE ---

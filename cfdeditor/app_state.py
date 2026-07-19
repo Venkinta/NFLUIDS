@@ -30,8 +30,6 @@ class AppContext:
     local variables in run_app()'s closure, so the handler functions below
     can take one `ctx` argument instead of a long parameter list.
     """
-    screen: object
-    renderer: object
     camera: object
     editor: object
     gfx: object = None             # Renderer — owns frame lifecycle + shared GL draws
@@ -155,7 +153,7 @@ EVENT_HANDLERS = {
 def update_editor(ctx):
     if not ctx.editor.finished:
         return AppState.EDITOR
-    ctx.physicseditor = PhysicsEditor(ctx.screen, ctx.editor.lines, ctx.renderer, ctx.editor.unit_idx)
+    ctx.physicseditor = PhysicsEditor(ctx.editor.lines, ctx.editor.unit_idx)
     return AppState.PHYSICS
 
 
@@ -168,9 +166,9 @@ def update_physics(ctx):
     if action == PhysicsAction.MESH:
         refinement_zones = physicseditor._get_refinement_polygons()
         mesher = Mesher(
-            ctx.screen, physicseditor.lines, physicseditor.n_layers,
+            physicseditor.lines, physicseditor.n_layers,
             physicseditor.growth_factor, physicseditor.thickness,
-            physicseditor.boundary_spacing, physicseditor.r, ctx.renderer,
+            physicseditor.boundary_spacing, physicseditor.r,
             unit_to_meters=physicseditor.unit_to_meters,
             refinement_zones=refinement_zones,
             bc_spacing_map=physicseditor._bc_spacing
@@ -198,7 +196,7 @@ def update_physics(ctx):
         vis_dict['cell_centers']  = data['cell_centers']  / physicseditor.unit_to_meters
 
         ctx.visualizer = Visualizer(
-            ctx.renderer, vis_dict, data['P'], data['U'],
+            vis_dict, data['P'], data['U'],
             res_cont=data.get('res_cont'), res_mom=data.get('res_mom'),
             mesh_data=data,
         )
@@ -231,7 +229,7 @@ def update_physics(ctx):
             tolerance     = physicseditor.tolerance,
         )
         ctx.solver_panel = SolverPanel(
-            ctx.solver, ctx.renderer,
+            ctx.solver,
             max_iterations = physicseditor.max_iterations,
             viz_interval   = physicseditor.viz_interval,
         )
@@ -239,7 +237,7 @@ def update_physics(ctx):
         # Visualizer uses, seeded with zero fields until the first
         # snapshot arrives from the solver thread.
         ctx.live_field = Visualizer(
-            ctx.renderer, ctx.vis_mesher,
+            ctx.vis_mesher,
             np.zeros(mesh_data['Nc']),
             np.zeros((mesh_data['Nc'], 2)),
             mesh_data=mesh_data,
@@ -310,7 +308,7 @@ def render_physics(ctx, dt):
 def render_solving(ctx, dt):
     ctx.live_field.draw_geometry(ctx.gfx)
     ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
-    ctx.solver_panel.draw(ctx.screen, ctx.camera, live_field=ctx.live_field)
+    ctx.solver_panel.draw(live_field=ctx.live_field)
 
 
 def render_visualizer(ctx, dt):
