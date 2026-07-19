@@ -252,6 +252,16 @@ def update_physics(ctx):
 def update_solving(ctx):
     """SOLVING → VISUALIZER when user clicks "Open Visualizer"."""
     if not ctx.solver_panel.finished:
+        # Pick up the latest live field snapshot (if any arrived this
+        # frame) and push it to the live-preview color VBO. State
+        # mutation, so it lives here rather than in render_solving.
+        if ctx.solver_panel.viz_snapshot is not None:
+            snap = ctx.solver_panel.viz_snapshot
+            ctx.solver_panel.viz_snapshot = None
+            ctx.live_field.update_fields(snap['P'], snap['U'],
+                                         res_cont=snap.get('res_cont'),
+                                         res_mom=snap.get('res_mom'))
+            ctx.live_field.update_vbo_colors()
         return AppState.SOLVING
     # Reuse the live preview's geometry/VBOs — just refresh with the
     # final fields instead of allocating a second Visualizer.
@@ -298,16 +308,6 @@ def render_physics(ctx, dt):
 
 
 def render_solving(ctx, dt):
-    # Pick up the latest live field snapshot (if any arrived this frame)
-    # and push it to the live-preview color VBO.
-    if ctx.solver_panel.viz_snapshot is not None:
-        snap = ctx.solver_panel.viz_snapshot
-        ctx.solver_panel.viz_snapshot = None
-        ctx.live_field.update_fields(snap['P'], snap['U'],
-                                     res_cont=snap.get('res_cont'),
-                                     res_mom=snap.get('res_mom'))
-        ctx.live_field.update_vbo_colors()
-
     ctx.live_field.draw_geometry(ctx.gfx)
     ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
     ctx.solver_panel.draw(ctx.screen, ctx.camera, live_field=ctx.live_field)
