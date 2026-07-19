@@ -190,12 +190,6 @@ class Editor:
             imgui.set_tooltip("Break the current chain to start a new disconnected shape (e.g. a hole).")
         imgui.end()
 
-        # --- NEW: Draw World Origin (0,0) ---
-        origin_screen = camera.to_screen((0, 0))
-        # Draw a simple Red/Green crosshair for X/Y axes
-        pygame.draw.line(screen, (255, 50, 50), (origin_screen[0] - 15, origin_screen[1]), (origin_screen[0] + 15, origin_screen[1]), 2)
-        pygame.draw.line(screen, (50, 255, 50), (origin_screen[0], origin_screen[1] - 15), (origin_screen[0], origin_screen[1] + 15), 2)
-
         # 3. Draw your CAD lines (World Space)
         for line in self.lines:
             line.draw(screen, camera)

@@ -63,7 +63,3 @@ class Quad:
             area += x0 * y1 - x1 * y0
 
         return abs(area) * 0.5
-    
-    def draw(self, screen, camera, color=(100, 255, 100), width=1):
-        # self.points is already [p1, p2, p3, p4]
-        camera.draw_polygon(self.points, screen, color, width)

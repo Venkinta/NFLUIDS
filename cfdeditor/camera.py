@@ -53,22 +53,6 @@ class Camera:
         glVertex2f(p1[0], p1[1])
         glEnd()
 
-    def draw_polygon(self, polygon_vertices, screen, color=(100, 100, 250), width=1):
-        """Draws Triangles/Quads (handles world-to-screen conversion)."""
-        r, g, b = [c/255.0 for c in color]
-        screen_points = [self.to_screen(p) for p in polygon_vertices]
-
-        if width == 0: # Filled
-            glBegin(GL_POLYGON)
-        else: # Outline
-            glLineWidth(width)
-            glBegin(GL_LINE_LOOP)
-            
-        glColor3f(r, g, b)
-        for p in screen_points:
-            glVertex2f(p[0], p[1])
-        glEnd()
-
     def draw_circle(self, screen, color, center_screen, radius, width=1):
         """Draws a circle using screen coordinates. Useful for snapping points."""
         r, g, b = [c/255.0 for c in color]

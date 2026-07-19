@@ -4,13 +4,11 @@ from matplotlib.path import Path
 import numpy as np
 from .bowyerwatson import Bowyer_watson
 from .point import Point
-import pygame
 from .quad import Quad
 from shapely.geometry import Polygon as ShapelyPoly
 from shapely.geometry import Point as ShapelyPoint
 from .triangle import Triangle
 import time
-import imgui
 from OpenGL.GL import *
 
 
@@ -56,7 +54,6 @@ class Mesher:
         self.refinement_zones = refinement_zones if refinement_zones is not None else []
 
         self.renderer = RENDERER
-        self.finished = False
 
     def mesh(self):
         t_total = time.perf_counter()
@@ -567,34 +564,6 @@ class Mesher:
         area = np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
         return area  # area < 0 is CCW, area > 0 is CW
 
-    def draw(self, screen, camera, vbos=None):
-        imgui.new_frame()
-
-        # If we have generated the VBO dictionary, use the fast GPU path
-        if vbos:
-            if 'triangles' in vbos:
-                camera.draw_vbo(vbos['triangles'][0], vbos['triangles'][1], color=(0, 100, 255))
-            if 'quads' in vbos:
-                camera.draw_vbo(vbos['quads'][0], vbos['quads'][1], color=(0, 255, 100))
-            if 'walls' in vbos:
-                camera.draw_vbo(vbos['walls'][0], vbos['walls'][1], color=(255, 255, 255))
-        else:
-            # Fallback (Slow object loop) if VBOs aren't ready yet
-            if hasattr(self, "lines"):
-                for line in self.lines:
-                    line.draw(screen, camera, color=(255, 255, 255), width=2)
-            if hasattr(self, 'boundary_elements'):
-                for quad in self.boundary_elements:
-                    quad.draw(screen, camera)
-            if hasattr(self, "triangulation") and self.triangulation:
-                self.triangulation.draw(screen, camera)
-
-        # NOTE: This draw() method is not currently invoked by main.py — the
-        # PHYSICS state renders the mesh via physics_editor.draw() and the
-        # Save/Load UI lives there too. Kept as a fallback renderer only.
-        imgui.render()
-        self.renderer.render(imgui.get_draw_data())
-        
     def get_render_data(self):
         """Categorizes mesh elements into bundles for multi-colored wireframe rendering."""
         # Bundle 1: Unstructured Interior (Triangles)
@@ -1213,6 +1182,3 @@ class Mesher:
     
         radius_grid = radius_flat.reshape(cols, rows)
         return inside_grid, radius_grid
-               
-    def finish(self):
-        self.finished = True
