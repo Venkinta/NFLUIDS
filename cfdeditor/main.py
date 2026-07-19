@@ -1,5 +1,6 @@
 from .editor import Editor
 from .camera import Camera
+from .renderer import Renderer
 from .app_state import AppContext, EVENT_HANDLERS, UPDATE_HANDLERS, RENDER_HANDLERS
 import pygame
 import OpenGL
@@ -33,10 +34,14 @@ def run_app():
     renderer = PygameRenderer()
     imgui.get_io().display_size = (WIDTH, HEIGHT)
 
+    camera = Camera()
+    gfx = Renderer(camera, renderer, screen)
+
     ctx = AppContext(
         screen=screen,
         renderer=renderer,
-        camera=Camera(),
+        camera=camera,
+        gfx=gfx,
         editor=Editor(screen, renderer),
     )
     running = True
@@ -65,10 +70,9 @@ def run_app():
 
         ctx.state = UPDATE_HANDLERS[ctx.state](ctx)
 
-        glClearColor(0.0, 0.0, 0.0, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT)
+        gfx.begin_frame()
         RENDER_HANDLERS[ctx.state](ctx, dt)
-        pygame.display.flip()
+        gfx.end_frame()
 
     pygame.quit()
 

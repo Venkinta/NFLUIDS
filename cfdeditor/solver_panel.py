@@ -287,8 +287,6 @@ class SolverPanel:
         SolverPanel has no hard dependency on Visualizer."""
         self._drain_queues()
 
-        imgui.new_frame()
-
         imgui.set_next_window_position(10, 10, imgui.ALWAYS)
         imgui.set_next_window_size(370, 0)
         imgui.begin("Solver Monitor",
@@ -400,5 +398,3 @@ class SolverPanel:
             imgui.pop_style_color(2)
 
         imgui.end()
-        imgui.render()
-        self.renderer.render(imgui.get_draw_data())

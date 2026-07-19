@@ -162,8 +162,6 @@ class Editor:
             self.start_pos = final_pos # Chain to next line
 
     def draw(self, screen, camera):
-        imgui.new_frame()
-        
         imgui.set_next_window_position(50, 50, imgui.ALWAYS)
         imgui.begin("Controls", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_ALWAYS_AUTO_RESIZE)
         
@@ -236,9 +234,5 @@ class Editor:
             imgui.text(f"Pos: ({target_world_pos.x:.2f}, {target_world_pos.y:.2f})")
             imgui.end()
 
-        # 5. Render ImGui on top of everything
-        imgui.render()
-        self.renderer.render(imgui.get_draw_data())
-            
     def finish(self):
         self.finished = True

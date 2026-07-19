@@ -128,8 +128,6 @@ class PhysicsEditor:
 
     # ------------------------------------------------------------------
     def draw(self, screen, camera, vbos=None):
-        imgui.new_frame()
-
         # --- Mesh overlay (drawn before imgui so UI sits on top) ---
         if vbos:
             if 'triangles' in vbos:
@@ -413,9 +411,6 @@ class PhysicsEditor:
                     "Outlet pressure [Pa]", self.outlet_pressure, step=0.1, step_fast=1.0)
 
             imgui.end()
-
-        imgui.render()
-        self.renderer.render(imgui.get_draw_data())
 
     # ------------------------------------------------------------------
     def _draw_refinement_zones(self, screen, camera):
