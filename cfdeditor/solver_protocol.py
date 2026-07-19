@@ -1,4 +1,25 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+import numpy as np
+
+
+@dataclass
+class SolverResults:
+    """Post-solve fields, returned by SolverProtocol.results.
+
+    This is the only surface main.py is allowed to depend on after a solve
+    finishes — it must not reach into solver-specific attributes directly.
+
+    `extra` is a forward-compat escape hatch for fields a future solver adds
+    (e.g. a temperature solver's `extra['T']`) without requiring another
+    breaking change to SolverProtocol itself.
+    """
+    U: np.ndarray
+    P: np.ndarray
+    res_cont: np.ndarray
+    res_mom: np.ndarray
+    extra: dict = field(default_factory=dict)
 
 
 class SolverProtocol(ABC):
@@ -53,4 +74,11 @@ class SolverProtocol(ABC):
         """Return *copies* of the current field arrays for live visualisation.
         Must return a fresh dict with copied arrays on every call so the caller
         owns the data. At minimum: {'U': ndarray(Nc,2), 'P': ndarray(Nc,)}.
+        """
+
+    @property
+    @abstractmethod
+    def results(self) -> SolverResults:
+        """Return the final post-solve fields as a SolverResults.
+        Valid only after finalize() has been called.
         """

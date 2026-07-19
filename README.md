@@ -155,7 +155,8 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Application entry point, state machine, main loop |
+| `main.py` | Application entry point — pygame/OpenGL/imgui bootstrap and the frame loop |
+| `app_state.py` | State machine: `AppState` enum, `AppContext`, per-state event/update/render dispatch tables |
 | `editor.py` | CAD drawing with snapping, constraints, loop validation |
 | `physics_editor.py` | Boundary condition and mesh parameter UI |
 | `mesher.py` | Mesh generation pipeline (multi-loop, holes) |
@@ -174,6 +175,8 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `meshIO.py` | Save/Load mesh (and, via the same generic dict format, full visualizations) to/from compressed `.npz` files |
 | `vtuIO.py` | Export mesh + solved fields as a VTK XML UnstructuredGrid (`.vtu`), for cross-validation in ParaView/other CFD codes |
 | `test_holes.py` | End-to-end test for multi-loop meshing with holes |
+| `test_force_balance.py` | Regression test: discrete force/mass balance on a solved channel |
+| `test_state_transitions.py` | Characterization test for the `AppState` transition graph |
 | `CODEBASE_REFERENCE.md` | Internal developer documentation |
 
 ## Known Limitations

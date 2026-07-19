@@ -12,9 +12,9 @@
 | Solver diverging | `solver.py → step()`, `initialize_conditions()`, `solver_protocol.py` |
 | BC tags wrong (inlet/outlet/wall misidentified) | `mesher.py → solver_data_pipeline()`, `create_boundary_points()` |
 | Units / scale wrong | `camera.py` (scale), `physics_editor.py` (defaults), `mesher.py → solver_data_pipeline()` |
-| UI / ImGui broken | whichever module's `draw()` method + `main.py` event handling |
-| State machine / screen transitions | `main.py` only |
-| Visualizer not showing results | `visualizer.py`, `main.py` SOLVING→VISUALIZER transition |
+| UI / ImGui broken | whichever module's `draw()` method + `app_state.py` event handlers |
+| State machine / screen transitions | `app_state.py` (`AppState`, `AppContext`, the three dispatch tables) — `main.py` is just the bootstrap + loop |
+| Visualizer not showing results | `visualizer.py`, `app_state.py`'s `update_solving()` (SOLVING→VISUALIZER transition) |
 | Solve monitor frozen / plots not updating / crashing | `solver_panel.py` — thread loop, queues, `_drain_queues()` |
 
 ---
@@ -29,29 +29,40 @@ EDITOR  →  PHYSICS  →  MESHER  →  SOLVING  →  VISUALIZER
               └────────────────────────────────────┘
 ```
 
-Managed entirely in `main.py` via a plain string `current_state` (`"EDITOR"` / `"PHYSICS"` / `"SOLVING"` / `"VISUALIZER"` — not a formal enum). `SOLVER`/`SOLVER_LOADED` no longer exist as separate states; both the live-mesh and loaded-`.npz` paths converge into the single `SOLVING` state. There is no VISUALIZER→EDITOR transition in the code — clicking "Back to Physics" in the Visualizer always loops back to PHYSICS (state preserved — mesh, BCs, VBOs, mesher, and physicseditor all survive), so the user can tweak solver settings and re-solve without rebuilding anything. The only way back to EDITOR is starting a fresh session. Each state owns its own module instance. The renderer (`PygameRenderer`) is created once in `main.py` and shared across all modules — **never re-create it**.
+**Since v1.8.0**, this is a formal `AppState` enum (`cfdeditor/app_state.py`) — not a bare string — and the machine is driven by three per-state dispatch tables (`EVENT_HANDLERS`, `UPDATE_HANDLERS`, `RENDER_HANDLERS`, all in `app_state.py`) rather than four hand-synced `if/elif current_state == ...` chains in `main.py`. `main.py`'s `run_app()` is now just bootstrap (pygame/OpenGL/imgui init) plus a loop that does three dict lookups per frame: `EVENT_HANDLERS[ctx.state](ctx, event, want_mouse)` per event, `ctx.state = UPDATE_HANDLERS[ctx.state](ctx)` once per frame, then `RENDER_HANDLERS[ctx.state](ctx, dt)`. `SOLVER`/`SOLVER_LOADED` don't exist as separate states; both the live-mesh and loaded-`.npz` paths converge into the single `SOLVING` state. There is no VISUALIZER→EDITOR transition — clicking "Back to Physics" in the Visualizer always loops back to PHYSICS (state preserved — mesh, BCs, VBOs, mesher, and physicseditor all survive), so the user can tweak solver settings and re-solve without rebuilding anything. The only way back to EDITOR is starting a fresh session. Each state owns its own module instance, held on the shared `AppContext` (see the `app_state.py` section below) rather than as bare locals in `run_app()`. The renderer (`PygameRenderer`) is created once in `main.py` and shared across all modules — **never re-create it**.
 
 ---
 
 ## 2. Module-by-Module Reference
 
-### `main.py` — Orchestrator
-**Owns:** state machine, main loop, OpenGL init, ImGui context creation, camera instance, clock.
+### `main.py` — Bootstrap + Loop
+**Owns:** pygame/OpenGL/imgui init, the `AppContext` construction, and the frame loop. As of v1.8.0 this is deliberately thin — the state machine itself lives in `app_state.py` (next section).
 
 **Critical details:**
 - ImGui context is created here ONCE (`imgui.create_context()`). Modules must NOT call this themselves.
-- The renderer is passed into `Editor`, `PhysicsEditor`, `Mesher` constructors. Don't duplicate it.
-- Event handling order matters: for every event, the active state's `renderer.process_event(event)` is called **first**, then `imgui.get_io().want_capture_mouse` is read once and used to gate both the global mouse-wheel camera zoom and click-based module handlers. Getting this order backwards (checking `want_capture_mouse` before feeding the event to ImGui) is what caused the old bug where scrolling over an ImGui panel also zoomed the camera underneath — the wheel handler used to run unconditionally, ahead of and independent from the per-state `process_event()` calls.
-- Camera is created here and passed into every `handle_event()` and `draw()` call — it is the single source of truth for zoom/pan state.
-- The fixed-update loop (`accumulator`) is stubbed out and does nothing currently.
+- The one `PygameRenderer` and one `Camera` are created here and stored on `AppContext` — every collaborator (`Editor`, `PhysicsEditor`, `Visualizer`, ...) is handed the *same* renderer instance via `ctx.renderer`. Don't duplicate it.
+- Event handling order matters: for every event, `renderer.process_event(event)` is called **first** (unconditionally, for all states — see below), then `imgui.get_io().want_capture_mouse` is read once and used to gate both the global mouse-wheel camera zoom and `EVENT_HANDLERS[ctx.state]`. Getting this order backwards (checking `want_capture_mouse` before feeding the event to ImGui) is what caused the old bug where scrolling over an ImGui panel also zoomed the camera underneath.
+- The per-state ImGui-feed used to be a fourth `if/elif` chain keyed on state (one branch per state, each calling `renderer.process_event(event)` on what was always the same shared renderer object) — removed in v1.8.0 as pure duplication with zero behavioral difference.
 - Profiling (`cProfile`) wraps the entire `run_app()` — results print on exit.
-- On `PHYSICS → SOLVING`, both the live-mesh path (`mesher.solver_data_pipeline()`) and the loaded-`.npz` path (dividing `cell_vertices`/`cell_centers` by `unit_to_meters`) build their `vis_mesher` before constructing `Solver(...)` and `SolverPanel(...)` — there is one construction site shared by both paths, not two.
-- **Live solve preview:** a `Visualizer` instance (`live_field`) is constructed right alongside `SolverPanel`, seeded with zero `P`/`U`/residual arrays. Every frame in `SOLVING`, if `solver_panel.viz_snapshot` is non-`None` it's consumed (set back to `None`) and pushed into `live_field` via `update_fields()` + `update_vbo_colors()`, then `live_field.draw_geometry(camera)` paints the colored mesh before `solver_panel.draw(screen, camera, live_field=live_field)` draws the monitor panel (plus a "Show" combo reusing `live_field.vars`/`var_idx`) on top. `Solver.field_snapshot` now includes `res_cont`/`res_mom` (from `self._live_res_cont`/`_live_res_mom`, refreshed every `step()`) alongside `P`/`U`, so all four Visualizer variables — Pressure, Velocity, Continuity Error, Momentum Error — are switchable live, not just Pressure. On `SOLVING → VISUALIZER`, `live_field` is refreshed with the final fields and promoted to `visualizer` directly — no second `Visualizer`/VBO set is ever allocated for the same solve.
-- On `VISUALIZER → PHYSICS`, `visualizer.destroy()` frees that cycle's `pos_vbo`/`color_vbo`/`vector_vbo` (a fresh `live_field` — and its own new VBOs — gets built on the next Solve). The wireframe `vbos` dict and `mesher`/`physicseditor` are untouched, so the "Solve" button is immediately available for a re-run with tweaked BCs/solver settings. Full teardown (`glDeleteBuffers` on `vbos`, resetting `mesher`/`physicseditor`) only happens on an explicit fresh mesh or load request.
-- **`_apply_loaded_mesh_settings(physicseditor, loaded, vbos)`** (module-level, above `run_app()`) rebuilds BC lines, meshing/solver scalar settings, `bc_spacing_map`/`refinement_zones`, and the wireframe preview VBOs from a loaded `.npz` dict — extracted so both `load_requested` (plain mesh) and `load_visualization_requested` (mesh + solved fields) land on an identically-populated `PHYSICS` state. Returns the new `vbos` dict (old buffer ids are freed first).
-- **`load_visualization_requested`** (set by `PhysicsEditor.open_load_visualization_dialog()`) is a fourth, independently-guarded `if` in the `PHYSICS` state block, alongside `mesh_requested`/`load_requested`/`solve_requested` — it calls `_apply_loaded_mesh_settings()` (so "Back to Physics" afterward still shows the mesh preview) then, unlike a plain mesh load, goes on to construct a `Visualizer` directly from the loaded dict's `P`/`U`/`res_cont`/`res_mom` and jump straight to `current_state = "VISUALIZER"` — skipping `SOLVING` entirely. `physicseditor.loaded_mesh` is also set to the loaded data so `Save Mesh`/a later re-solve still works. This only works because `mesh_data` (as opposed to the separately-built, unit-rescaled `vis_dict`) is never rescaled anywhere in the pipeline — it's always the canonical SI-metres solver dict, whether freshly computed or loaded from a file — so `Visualizer.mesh_data` round-trips through a save/load with no unit-conversion code needed.
+- `EVENT_HANDLERS` has no entries for `SOLVING`/`VISUALIZER` — those two states get no per-event handling beyond the unconditional ImGui feed and mouse-wheel zoom above, matching pre-v1.8.0 behavior (`.get(ctx.state)` returns `None` and is skipped).
 
 **What NOT to touch here:** OpenGL init sequence (`glOrtho`, blend mode). Changing it will break ImGui rendering.
+
+---
+
+### `app_state.py` — State Machine (`AppState`, `AppContext`, dispatch tables)
+
+**Owns:** the `AppState` enum, the `AppContext` dataclass, the per-state `EVENT_HANDLERS`/`UPDATE_HANDLERS`/`RENDER_HANDLERS` dicts, and `_apply_loaded_mesh_settings()`. Added in v1.8.0 to replace `main.py`'s four hand-synced `if/elif current_state == ...` chains — this is the module the Quick Navigation table above points to for state-machine questions.
+
+**Design, deliberately not a class-per-state FSM:** each state has one function per concern (`update_editor`, `update_physics`, `update_solving`, `update_visualizer`, plus their event/render counterparts where applicable), not a `State` base class with `on_enter`/`handle_event`/`update`/`render` hooks. The reason: `VISUALIZER → PHYSICS` deliberately *reuses* the existing `PhysicsEditor` instance rather than re-entering fresh (mesh/BCs must survive so a re-solve is possible), so a "construct a new State object per visit" pattern would have to special-case the one thing its own on-enter/on-exit hooks are supposed to handle uniformly. Dispatch tables fix the real defect (four hand-synced chains, `PHYSICS`'s four request-flag `if`s having no structural mutual exclusivity) with the least new structure.
+
+- **`AppContext`** — a plain dataclass holding what used to be a dozen bare local variables in `run_app()`'s closure: `screen`, `renderer`, `camera`, `editor`, `state`, `vbos`, `physicseditor`, `mesher`, `solver` (kept alive across SOLVING and VISUALIZER, same as before), `solver_panel`, `visualizer`, `vis_mesher`, `live_field`. This isn't new architecture, just a name for what already existed.
+- **`update_editor(ctx)`** — EDITOR → PHYSICS on `ctx.editor.finished`; constructs `PhysicsEditor(...)`.
+- **`update_physics(ctx)`** — dispatches on `ctx.physicseditor.pending_action` (a `PhysicsAction` enum from `physics_editor.py`, replacing the old four independent `mesh_requested`/`load_requested`/`load_visualization_requested`/`solve_requested` booleans — see that module's section below). `MESH` and `LOAD_MESH` stay in `PHYSICS`; `LOAD_VISUALIZATION` jumps straight to `VISUALIZER` (skipping `SOLVING` entirely); `SOLVE` builds `Solver`+`SolverPanel`+the live-preview `Visualizer` (`live_field`) and moves to `SOLVING`. Same per-action logic as before v1.8.0, just organized as one function keyed on a single field instead of four independently-guarded `if`s.
+- **`update_solving(ctx)`** — SOLVING → VISUALIZER when `ctx.solver_panel.finished`. Reads `ctx.solver.results` (a `SolverResults`, see `solver_protocol.py` below) instead of reaching into `solver.P`/`solver.U`/`solver.final_res_cont`/`solver.final_res_mom` as bare attributes — this is the v1.8.0 fix for the old solver-boundary leak (`main.py` used to depend on those four attribute names existing on whatever `SolverProtocol` implementation was in use, undocumented by the ABC). Reuses `live_field`'s VBOs by promoting it directly to `ctx.visualizer` — no second `Visualizer`/VBO set is ever allocated for the same solve.
+- **`update_visualizer(ctx)`** — VISUALIZER → PHYSICS when `ctx.visualizer.finished`; calls `.destroy()` to free that cycle's VBOs. `ctx.vbos` (the wireframe mesh) and `ctx.mesher`/`ctx.physicseditor` are untouched, so "Solve" is immediately available again with tweaked BCs/solver settings.
+- **`_apply_loaded_mesh_settings(physicseditor, loaded, vbos)`** (module-level) — rebuilds BC lines, meshing/solver scalar settings, `bc_spacing_map`/`refinement_zones`, and the wireframe preview VBOs from a loaded `.npz` dict. Shared by `LOAD_MESH` and `LOAD_VISUALIZATION` so returning to `PHYSICS` afterward always shows a consistent, populated state. Its VBO rebuild now goes through `Mesher.upload_wireframe_bundles()` (see `mesher.py` below) instead of inlining `glGenBuffers`/`glBufferData` — the same OpenGL upload sequence used to be copy-pasted near-verbatim here and in the fresh-mesh path.
+- **Render handlers** (`render_editor`/`render_physics`/`render_solving`/`render_visualizer`) are straight ports of the old per-state rendering branches — `render_solving` still does the "drain `viz_snapshot` → push into `live_field` → draw geometry → draw walls VBO → draw the monitor panel" sequence inline, unchanged from pre-v1.8.0 behavior.
 
 ---
 
@@ -138,7 +149,9 @@ Returns a `Point`. The returned Point may be a reference to an *existing* endpoi
 
 **BC assignment:** Clicking a line (via `handle_selection`) opens a per-line ImGui window. The `boundary_types` list order matters — index maps to the combo box index AND to the `bc_map` in Mesher.
 
-**Load Visualization:** `open_load_visualization_dialog()` sits alongside `open_load_dialog()` — same tkinter file-picker pattern, but validates `'P' in data and 'U' in data` before accepting the file (prints and returns otherwise, so picking a plain mesh-only save here fails clearly rather than crashing downstream), then sets `loaded_visualization`/`load_visualization_requested` (mirroring `loaded_mesh`/`load_requested`) instead. `main.py` reads this flag to jump straight to `VISUALIZER` — see the `main.py` section above.
+**Load Visualization:** `open_load_visualization_dialog()` sits alongside `open_load_dialog()` — same tkinter file-picker pattern, but validates `'P' in data and 'U' in data` before accepting the file (prints and returns otherwise, so picking a plain mesh-only save here fails clearly rather than crashing downstream), then sets `loaded_visualization` and `pending_action = PhysicsAction.LOAD_VISUALIZATION`. `app_state.py`'s `update_physics()` reads this to jump straight to `VISUALIZER` — see the `app_state.py` section above.
+
+**`pending_action` (since v1.8.0):** a single `Optional[PhysicsAction]` field (`PhysicsAction` is a small enum: `MESH`, `LOAD_MESH`, `LOAD_VISUALIZATION`, `SOLVE`, defined in this module) replaces four independent booleans (`mesh_requested`/`load_requested`/`load_visualization_requested`/`solve_requested`) that used to be checked as four separate, unguarded `if`s in `main.py`'s `PHYSICS` transition. Each UI button/dialog sets `pending_action` to exactly one value; `app_state.py`'s `update_physics()` reads and clears it each frame. One nullable field composes correctly if a future action is added (e.g. a temperature-solve button); four independent booleans didn't structurally guarantee only one fires per frame.
 
 **Important:** `inlet_velocity` is a single float here, but the Solver receives `[inlet_velocity, 0.0]` — a 2D vector. This is assembled in `main.py`.
 
@@ -150,9 +163,11 @@ Returns a `Point`. The returned Point may be a reference to an *existing* endpoi
 
 ### `solver_protocol.py` — the Solver ABC
 
-Defines `SolverProtocol(ABC)` with four abstract methods: `initialize_conditions()`, `step(**state)`, `finalize(**final_state)`, and `field_snapshot` (a property). The `**state`/`**final_state` convention means a concrete solver owns its own internal keys entirely — `SolverPanel` never inspects them. The only keys that are part of the **public contract** are `'residuals'` (dict of named floats) and `'converged'` (bool) in the dict returned by `step()`; everything else round-trips opaquely between `SolverPanel` and the concrete solver. `step()` returning `None` signals fatal divergence. `field_snapshot` must return copies (not views) of the current field arrays, at minimum `{'U': ndarray(Nc,2), 'P': ndarray(Nc,)}`.
+Defines `SolverProtocol(ABC)` with five abstract members: `initialize_conditions()`, `step(**state)`, `finalize(**final_state)`, `field_snapshot` (a property), and `results` (a property, added v1.8.0). The `**state`/`**final_state` convention means a concrete solver owns its own internal keys entirely — `SolverPanel` never inspects them. The only keys that are part of the **public contract** are `'residuals'` (dict of named floats) and `'converged'` (bool) in the dict returned by `step()`; everything else round-trips opaquely between `SolverPanel` and the concrete solver. `step()` returning `None` signals fatal divergence. `field_snapshot` must return copies (not views) of the current field arrays, at minimum `{'U': ndarray(Nc,2), 'P': ndarray(Nc,)}`.
 
-**Why it exists:** a future LES solver (or anything else) just inherits this ABC, implements the four methods, and the rest of the app — `SolverPanel`, `main.py`, `Visualizer` — works with zero changes.
+**`results` / `SolverResults` (since v1.8.0):** `results` must return a `SolverResults` dataclass (`U`, `P`, `res_cont`, `res_mom`, plus an `extra: dict` forward-compat escape hatch for fields a future solver adds — e.g. a temperature solver's `extra['T']` — without another breaking change to this ABC), valid after `finalize()`. This closes the one real solver-boundary leak that predated v1.8.0: `app_state.py`'s `update_solving()` used to read `solver.P`/`solver.U`/`solver.final_res_cont`/`solver.final_res_mom` as bare attributes, undocumented by the ABC — any alternative `SolverProtocol` implementation had to happen to expose those exact names for the app to work post-solve. `Solver.results` is a one-line property packaging the *same* underlying attributes (`self.U`/`self.P`/`self.final_res_cont`/`self.final_res_mom`) — those attributes were **not** renamed or removed, since `test_force_balance.py` and `test_holes.py` still read them (and a much wider attribute surface — `owner`, `boundary_tags`, `Sf`, `Cf`, `df`, `magDf`, `magSf`, `cell_centers`) directly, bypassing the ABC entirely, which is fine since those are test-only call sites, not `main.py`/`app_state.py`.
+
+**Why it exists:** a future LES solver (or the planned temperature/scalar-transport solver) just inherits this ABC, implements the five methods, and the rest of the app — `SolverPanel`, `app_state.py`, `Visualizer` — works with zero changes.
 
 ---
 
@@ -254,6 +269,12 @@ The most complex module. Four main phases:
 #### Phase 4: Triangulation & Filter
 - Calls `Bowyer_watson(all_interior_pts)`.
 - `filter_triangles()` removes triangles outside the inner ring using `matplotlib.path.Path.contains_points`.
+
+#### Wireframe VBOs (`rebuild_wireframe_vbos()`, `upload_wireframe_bundles()`, since v1.8.0)
+- `get_render_data()` (pre-existing) turns the live mesh's triangulation/boundary/CAD-line objects into `{key: (float32 coords array, point count)}` bundles.
+- `rebuild_wireframe_vbos(self, old_vbos)` — instance method; deletes `old_vbos`' GL buffers and uploads fresh ones from `self.get_render_data()`. Called from `app_state.py`'s `update_physics()` on `MESH`/remesh.
+- `upload_wireframe_bundles(old_vbos, bundles)` — `@staticmethod`; owns just the OpenGL upload sequence (delete old → gen/bind/buffer per key with count>0 → unbind). Also called directly (not via an instance) from `_apply_loaded_mesh_settings()` in `app_state.py`, which builds its own bundles dict from a loaded `.npz`'s raw `cell_vertices`/`cell_nverts` arrays — there's no live `Mesher` object in that path, so it can't call `get_render_data()`, but the OpenGL upload sequence itself was identical duplicated code in both places before v1.8.0.
+- This is the first place `mesher.py` imports `OpenGL.GL` directly — previously all rendering here was via `camera.draw_vbo()` (drawing only, not VBO creation).
 
 #### Distance-Weighted Interpolation (`_gx_int`)
 - Computed once in `_precompute_topology()` (lines 202-214) as `self._gx_int = d_Pf / d_PN`, where `d_Pf` is the distance from the owner cell center to the shared face midpoint and `d_PN` is the total owner→neighbor center distance (`magDf`).
@@ -373,6 +394,7 @@ Solver.step(**state) → one SIMPLE iteration
   ├── CORRECT_PRESSURE_AND_VELOCITY()
   └── returns {..solver state.., 'residuals': {...}, 'converged': bool}
 Solver.finalize(**final_state) → final_res_cont / final_res_mom for Visualizer
+Solver.results → SolverResults(U, P, res_cont, res_mom, extra={})  # what app_state.py reads post-solve
 ```
 `Solve()` still exists as a thin wrapper that loops over `step()` for callers that want a blocking, non-threaded solve.
 
@@ -420,6 +442,15 @@ A 640-pixel-wide drawing = 640 "world units" fed to the solver as 640 metres. At
 - `line.py`: `u_val`, `v_val`, `p_val` are unused (future per-line BC values).
 - `solver.py → health_check()` prints every iteration — verbose, should be gated.
 - `data_structures.txt` is partially outdated — `magSf` was added later and is in the actual pipeline but not the txt.
+
+### Resolved technical debt (v1.8.0 — main.py / solver-boundary refactor)
+- **State machine restructured** — `main.py`'s four hand-synced `if/elif current_state == ...` chains (bare-string state, ImGui event feed, gated event handling, transitions, rendering) replaced with a formal `AppState` enum and three per-state dispatch tables in the new `cfdeditor/app_state.py`. `main.py` is now just bootstrap + a three-dict-lookup loop. See the `app_state.py` section above.
+- **Redundant ImGui event-feed chain removed** — all four states called `renderer.process_event(event)` on the identical shared renderer instance; collapsed to one unconditional call.
+- **Solver-boundary leak closed** — `SolverProtocol` gained a `results` property (`SolverResults` dataclass) so `app_state.py` no longer depends on undocumented bare attributes (`solver.P`/`.U`/`.final_res_cont`/`.final_res_mom`) that happened to work by convention. See the `solver_protocol.py` section above.
+- **Duplicated wireframe-VBO upload code merged** — the mesh-rebuild and loaded-`.npz` paths each inlined an identical delete/gen/bind/buffer OpenGL sequence; now both call `Mesher.upload_wireframe_bundles()` (or the instance-level `rebuild_wireframe_vbos()` wrapper). See the `mesher.py` section above.
+- **`PhysicsEditor`'s four request booleans collapsed** — `mesh_requested`/`load_requested`/`load_visualization_requested`/`solve_requested` replaced with one `pending_action: Optional[PhysicsAction]`, removing a class of "two flags true in the same frame" risk that four independent `if`s (not `elif`s) didn't structurally prevent.
+- **New regression coverage**: `test_state_transitions.py` (root-level, matching `test_holes.py`'s plain-script convention) characterizes the `AppState` transition graph using bare stand-in objects — no pygame/OpenGL context needed. `update_editor`/`update_solving`/`update_visualizer` are exercised directly (none of their code paths touch GL); `update_physics`'s `MESH`/`LOAD_MESH`/`LOAD_VISUALIZATION`/`SOLVE` branches are mirrored rather than executed directly, since they construct real `Mesher`/`Solver`/`SolverPanel`/`Visualizer` objects — `Visualizer.__init__` and `Mesher.rebuild_wireframe_vbos()` call `glGenBuffers()` directly (needs a bound GL context) and `SolverPanel.__init__` spawns a background thread, neither of which is safe or meaningful to exercise headlessly.
+- **Deliberately deferred, not fixed**: a `MesherProtocol` analogous to `SolverProtocol` — there is one meshing algorithm and no second one planned (unlike the solver side, where a temperature solver and a transient solver are both on the roadmap), so a mesher ABC now would be speculative symmetry, not a fix for a real leak. `Mesher.draw()` (dead code — never called by `main.py`/`app_state.py`) and `Mesher.finished`/`finish()` (set but never read) were noticed while touching this file but left alone, most naturally cleaned up as part of the separately-planned rendering-engine unification.
 
 ### Resolved technical debt (this pass)
 - **Steiner grid OOB crash** — `get_grid_coords` in `create_steiner_points` now clamps indices to `[0, cols-1]`/`[0, rows-1]`, fixing an `IndexError` when a candidate landed exactly on the polygon bounds.

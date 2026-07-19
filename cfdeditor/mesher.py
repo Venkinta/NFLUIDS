@@ -11,6 +11,7 @@ from shapely.geometry import Point as ShapelyPoint
 from .triangle import Triangle
 import time
 import imgui
+from OpenGL.GL import *
 
 
 class Mesher:
@@ -630,7 +631,33 @@ class Mesher:
             'quads': (np.array(quad_coords, dtype=np.float32), len(quad_coords) // 2),
             'walls': (np.array(wall_coords, dtype=np.float32), len(wall_coords) // 2)
         }
-    
+
+    @staticmethod
+    def upload_wireframe_bundles(old_vbos, bundles):
+        """Delete `old_vbos`' GL buffers and upload `bundles`
+        (key -> (float32 coords array, point count)) as new VBOs.
+
+        Shared by the live-mesh path (rebuild_wireframe_vbos, below) and
+        the loaded-.npz path in main.py's _apply_loaded_mesh_settings,
+        which builds its own bundles dict from stored cell data since it
+        has no live Mesher/triangulation to call get_render_data() on.
+        """
+        for vbo_id, _ in old_vbos.values():
+            glDeleteBuffers(1, [vbo_id])
+        new_vbos = {}
+        for key, (data, count) in bundles.items():
+            if count > 0:
+                vbo_id = glGenBuffers(1)
+                glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+                glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                new_vbos[key] = (vbo_id, count)
+        return new_vbos
+
+    def rebuild_wireframe_vbos(self, old_vbos):
+        """Delete `old_vbos` and build fresh wireframe VBOs from this mesh."""
+        return Mesher.upload_wireframe_bundles(old_vbos, self.get_render_data())
+
     def boundary_layer(self, polygon_points, current_thickness_array,
                        extrude_toward_interior=True):
         """
