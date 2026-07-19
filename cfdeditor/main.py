@@ -1,6 +1,6 @@
 from .editor import Editor
 from .camera import Camera
-from .renderer import Renderer, logo_overlay
+from .renderer import Renderer, VboHandle, logo_overlay
 from .app_state import AppContext, EVENT_HANDLERS, UPDATE_HANDLERS, RENDER_HANDLERS
 import pygame
 import OpenGL
@@ -75,6 +75,7 @@ def run_app():
         RENDER_HANDLERS[ctx.state](ctx, dt)
         gfx.end_frame()
 
+    VboHandle.delete_all()
     pygame.quit()
 
 
