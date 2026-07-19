@@ -27,6 +27,8 @@ import pygame
 import imgui
 from OpenGL.GL import *
 
+from . import __version__
+
 
 class Renderer:
     """Owns the frame; holds the app's single Camera for world-space draws."""
@@ -56,3 +58,15 @@ class Renderer:
     def add_overlay(self, fn):
         """Register fn() to be called every frame, in every state."""
         self._overlays.append(fn)
+
+
+def logo_overlay():
+    """Persistent NFLUIDS stamp, top-left, in every state.
+
+    Drawn on ImGui's foreground draw list so it sits above all windows
+    (Solver Monitor and Post-Processor are both pinned near the top-left)
+    without capturing any mouse input.
+    """
+    draw_list = imgui.get_foreground_draw_list()
+    color = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.45)
+    draw_list.add_text(8, 6, color, f"NFLUIDS v{__version__}")
