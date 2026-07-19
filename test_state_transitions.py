@@ -43,8 +43,6 @@ def physics_next_state(ctx):
 
 
 def _ctx(**kwargs):
-    kwargs.setdefault("screen", None)
-    kwargs.setdefault("renderer", None)
     kwargs.setdefault("camera", None)
     kwargs.setdefault("editor", None)
     return AppContext(**kwargs)

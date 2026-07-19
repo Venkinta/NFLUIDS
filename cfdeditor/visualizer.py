@@ -7,8 +7,7 @@ from .smoke_particles import SmokeParticles
 from .renderer import VboHandle
 
 class Visualizer:
-    def __init__(self, renderer, mesher, P, U, res_cont=None, res_mom=None, mesh_data=None):
-        self.renderer = renderer
+    def __init__(self, mesher, P, U, res_cont=None, res_mom=None, mesh_data=None):
         self.mesher = mesher
         # solver_data_pipeline() dict (boundary_tags/Cf/unit_to_meters) — used
         # by SmokeParticles to find velocity-inlet faces to seed from. Not

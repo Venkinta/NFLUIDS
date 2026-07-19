@@ -83,9 +83,9 @@ def main():
     })
 
     mesher = Mesher(
-        screen=None, lines=lines,
+        lines=lines,
         n_layers=3, growth_factor=1.2, thickness=1.0,
-        spacing=5.0, r=4.0, RENDERER=None, unit_to_meters=UNIT_TO_M,
+        spacing=5.0, r=4.0, unit_to_meters=UNIT_TO_M,
     )
     print("=== MESH ===")
     mesher.mesh()
