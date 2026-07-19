@@ -294,7 +294,7 @@ def render_editor(ctx, dt):
 
 
 def render_physics(ctx, dt):
-    ctx.physicseditor.draw(ctx.screen, ctx.camera, ctx.vbos)
+    ctx.physicseditor.draw(ctx.screen, ctx.camera, ctx.vbos, gfx=ctx.gfx)
 
 
 def render_solving(ctx, dt):
@@ -309,8 +309,7 @@ def render_solving(ctx, dt):
         ctx.live_field.update_vbo_colors()
 
     ctx.live_field.draw_geometry(ctx.camera)
-    if ctx.vbos and 'walls' in ctx.vbos:
-        ctx.camera.draw_vbo(ctx.vbos['walls'][0], ctx.vbos['walls'][1], color=(255, 255, 255))
+    ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
     ctx.solver_panel.draw(ctx.screen, ctx.camera, live_field=ctx.live_field)
 
 
