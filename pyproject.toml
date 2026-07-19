@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.8.0"
-description = "Interactive 2D CFD Solver with CAD Frontend — Restructured state machine (AppState + per-state dispatch tables) and a formalized solver plug-in boundary (SolverProtocol.results), clearing the path for additional solvers"
+version = "1.9.0"
+description = "Interactive 2D CFD Solver with CAD Frontend — Unified rendering engine (Renderer frame lifecycle, VboHandle buffer lifecycle, overlay hook with persistent NFLUIDS stamp); Camera reduced to pure view math"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

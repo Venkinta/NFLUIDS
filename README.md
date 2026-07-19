@@ -157,6 +157,7 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 |------|---------|
 | `main.py` | Application entry point — pygame/OpenGL/imgui bootstrap and the frame loop |
 | `app_state.py` | State machine: `AppState` enum, `AppContext`, per-state event/update/render dispatch tables |
+| `renderer.py` | Shared rendering engine: frame lifecycle (one ImGui frame per loop), GL draw helpers, `VboHandle` buffer lifecycle, cross-cutting overlay hook (logo stamp) |
 | `editor.py` | CAD drawing with snapping, constraints, loop validation |
 | `physics_editor.py` | Boundary condition and mesh parameter UI |
 | `mesher.py` | Mesh generation pipeline (multi-loop, holes) |
@@ -164,7 +165,7 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `solver_protocol.py` | Abstract solver interface (`SolverProtocol`) |
 | `solver_panel.py` | Threaded solve orchestration + live monitor UI |
 | `visualizer.py` | Post-processing and field visualization |
-| `camera.py` | World↔screen coordinate transforms, drawing primitives |
+| `camera.py` | World↔screen coordinate transforms and zoom (pure math — drawing lives in `renderer.py`) |
 | `point.py` | 2D point geometry primitive |
 | `line.py` | CAD edge with boundary metadata |
 | `triangle.py` / `quad.py` | Cell geometry types |
