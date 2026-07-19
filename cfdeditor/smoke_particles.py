@@ -2,6 +2,8 @@ import math
 import numpy as np
 from OpenGL.GL import *
 
+from .renderer import VboHandle
+
 # solver_data_pipeline()'s boundary_tags convention (mesher.py bc_map).
 _BC_VELOCITY_INLET = 1
 
@@ -39,8 +41,7 @@ class SmokeParticles:
 
         self._grow(self.count)
 
-        self.particle_vbo = glGenBuffers(1)
-        self.vertex_count = 0
+        self.particle_vbo = VboHandle(components=2, usage=GL_DYNAMIC_DRAW)
         self._update_particle_vbo()
 
     def _compute_domain_bbox(self):
@@ -189,22 +190,12 @@ class SmokeParticles:
         self._update_particle_vbo()
 
     def _update_particle_vbo(self):
-        self.vertex_count = len(self.positions)
-        glBindBuffer(GL_ARRAY_BUFFER, self.particle_vbo)
-        glBufferData(GL_ARRAY_BUFFER, self.positions.nbytes, self.positions, GL_DYNAMIC_DRAW)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.particle_vbo.upload(self.positions)
 
-    def draw(self, camera):
-        camera.apply_gl_transform()
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glPointSize(self.point_size)
-        glColor3f(*self.color)
-        glBindBuffer(GL_ARRAY_BUFFER, self.particle_vbo)
-        glVertexPointer(2, GL_FLOAT, 0, None)
-        glDrawArrays(GL_POINTS, 0, self.vertex_count)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        camera.remove_gl_transform()
+    def draw(self, gfx):
+        gfx.draw_vbo(self.particle_vbo,
+                     color=tuple(c * 255 for c in self.color),
+                     mode=GL_POINTS, point_size=self.point_size)
 
     def destroy(self):
-        glDeleteBuffers(1, [self.particle_vbo])
+        self.particle_vbo.delete()

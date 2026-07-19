@@ -134,6 +134,24 @@ class Renderer:
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glDisableClientState(GL_VERTEX_ARRAY)
 
+    def draw_vbo_colored(self, pos_handle, color_handle, mode=GL_TRIANGLES):
+        """Draw a position VboHandle (2 floats/vertex) with per-vertex RGB
+        from a second handle (3 floats/vertex). The vertex count comes from
+        the position handle — the color handle must cover as many vertices."""
+        if pos_handle is None or pos_handle.id is None or pos_handle.count == 0:
+            return
+        with self._world_transform():
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, pos_handle.id)
+            glVertexPointer(2, GL_FLOAT, 0, None)
+            glBindBuffer(GL_ARRAY_BUFFER, color_handle.id)
+            glColorPointer(3, GL_FLOAT, 0, None)
+            glDrawArrays(mode, 0, pos_handle.count)
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
 
 def logo_overlay():
     """Persistent NFLUIDS stamp, top-left, in every state.
