@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from .line import Line
 from matplotlib.path import Path
@@ -8,6 +9,7 @@ from .quad import Quad
 from shapely.geometry import Polygon as ShapelyPoly
 from shapely.geometry import Point as ShapelyPoint
 from .triangle import Triangle
+from .mesh_quality import seam_quality
 from .renderer import VboHandle
 import time
 from OpenGL.GL import *
@@ -170,6 +172,89 @@ class Mesher:
         print(f"  Generated {n_final} interior cells  +  {len(self.boundary_elements)} boundary cells")
         print(f"  Grand total: {n_final + len(self.boundary_elements)} cells")
         print("="*50 + "\n")
+
+    def smooth_mesh(self, passes=3, relaxation=0.5, tolerance_deg=1.0):
+        """Opt-in Laplacian smoothing of the interior Steiner points.
+
+        Moves each Steiner point toward the centroid of its Delaunay
+        neighbours and re-triangulates, for up to `passes` iterations. Ring
+        points (the outermost boundary-layer row) and all boundary-layer
+        points are frozen.
+
+        A pass is committed unless it drops `seam_quality` (the worst
+        min-angle among ring/interior seam triangles) by more than
+        `tolerance_deg` below the best value seen so far. The tolerance
+        exists because moving thousands of points shifts the Delaunay
+        topology everywhere, not just near the point that was worst before
+        -- some *other*, previously-fine triangle drifting by a fraction of
+        a degree is normal noise, not a real regression, and a strict
+        never-get-worse rule would reject almost every pass on any
+        realistically sized mesh. The first pass that regresses past the
+        tolerance is discarded and the loop stops there, since a
+        deterministic relaxation would just reproduce the same result on
+        any further attempt.
+        """
+        if self.triangulation is None or not self.loop_layer_stacks:
+            raise RuntimeError("smooth_mesh() requires an existing mesh; call mesh() first.")
+
+        inner_rings = [stack[-1] for stack in self.loop_layer_stacks]
+        ring_points = {Point(p[0], p[1]) for ring in inner_rings for p in ring}
+
+        quality = seam_quality(self.triangulation, ring_points)
+        best_quality = quality
+        passes_done = 0
+
+        for _ in range(passes):
+            adjacency = {}
+            for t in self.triangulation.triangles:
+                for edge in t.edges():
+                    p1, p2 = tuple(edge)
+                    adjacency.setdefault(p1, set()).add(p2)
+                    adjacency.setdefault(p2, set()).add(p1)
+
+            movable = [p for p in adjacency if p not in ring_points]
+            if not movable:
+                break
+
+            new_positions = {}
+            for p in movable:
+                neighbors = adjacency[p]
+                if not neighbors:
+                    continue
+                cx = sum(n.x for n in neighbors) / len(neighbors)
+                cy = sum(n.y for n in neighbors) / len(neighbors)
+                new_x = p.x + relaxation * (cx - p.x)
+                new_y = p.y + relaxation * (cy - p.y)
+
+                nearest_ring_dist = min(math.hypot(p.x - r.x, p.y - r.y) for r in ring_points)
+                new_dist = min(math.hypot(new_x - r.x, new_y - r.y) for r in ring_points)
+                if new_dist < 0.5 * nearest_ring_dist:
+                    continue  # guard: don't let this point encroach on the ring this pass
+
+                new_positions[p] = Point(new_x, new_y)
+
+            candidate_points = [new_positions.get(p, p) for p in adjacency]
+            candidate = Bowyer_watson(candidate_points)
+
+            prev_triangulation = self.triangulation
+            self.triangulation = candidate
+            self.filter_triangles(inner_rings, self.outer_idx)
+
+            new_quality = seam_quality(self.triangulation, ring_points)
+            n_moved = len(new_positions)
+            print(f"    pass {passes_done + 1}: moved {n_moved}/{len(movable)} pts, "
+                  f"worst seam angle {quality:.2f} -> {new_quality:.2f} deg "
+                  f"(best so far {best_quality:.2f})")
+            if new_quality >= best_quality - tolerance_deg:
+                quality = new_quality
+                best_quality = max(best_quality, new_quality)
+                passes_done += 1
+            else:
+                self.triangulation = prev_triangulation
+                break
+
+        print(f"  Smooth mesh: {passes_done}/{passes} passes committed "
+              f"(worst seam angle {quality:.2f} deg)")
 
     def create_boundary_points(self, ordered_lines):
         """Sample boundary points along a single ordered loop.

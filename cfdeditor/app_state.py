@@ -181,6 +181,14 @@ def update_physics(ctx):
         physicseditor.loaded_mesh = None  # invalidate stale loaded mesh so Solve uses this fresh remesh
         ctx.mesher = mesher
 
+    # --- Smooth the current mesh in place (opt-in, no full remesh) ---
+    elif action == PhysicsAction.SMOOTH_MESH:
+        physicseditor.mesher.smooth_mesh(
+            passes=physicseditor.smooth_passes,
+            relaxation=physicseditor.smooth_relaxation)
+        ctx.vbos = physicseditor.mesher.rebuild_wireframe_vbos(ctx.vbos)
+        physicseditor.loaded_mesh = None  # stale after in-place smoothing
+
     # --- Load saved mesh (.npz) ---
     elif action == PhysicsAction.LOAD_MESH:
         ctx.vbos = _apply_loaded_mesh_settings(physicseditor, physicseditor.loaded_mesh, ctx.vbos)

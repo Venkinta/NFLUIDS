@@ -16,6 +16,7 @@ class PhysicsAction(Enum):
     cleared by main.py's PHYSICS transition handling. Replaces four
     independent request booleans so at most one action is ever pending."""
     MESH = auto()
+    SMOOTH_MESH = auto()
     LOAD_MESH = auto()
     LOAD_VISUALIZATION = auto()
     SOLVE = auto()
@@ -42,6 +43,10 @@ class PhysicsEditor:
         # carries solved fields (P/U/...), so main.py jumps straight to the
         # VISUALIZER state instead of landing in PHYSICS for a re-solve.
         self.loaded_visualization = None
+
+        # --- Mesh smoothing parameters (Smooth Mesh button) ---
+        self.smooth_passes = 3
+        self.smooth_relaxation = 0.5
 
         # --- Fluid Properties (always SI) ---
         self.density = 1.2       # kg/m3
@@ -249,6 +254,20 @@ class PhysicsEditor:
         if opened2:
             _, self.r = imgui.input_float(f"Mesh size (min sep.) [{u}]", self.r, step=1.0, step_fast=10.0)
 
+        opened_sm, _ = imgui.collapsing_header("Smoothing settings")
+        if opened_sm:
+            imgui.push_item_width(160)
+            _, self.smooth_passes = imgui.input_int("Passes", self.smooth_passes, step=1)
+            self.smooth_passes = max(1, min(self.smooth_passes, 10))
+            _, self.smooth_relaxation = imgui.slider_float(
+                "Relaxation", self.smooth_relaxation, 0.05, 1.0)
+            imgui.pop_item_width()
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Relax interior points toward their Delaunay\n"
+                                  "neighbour centroid to even out the seam between\n"
+                                  "the boundary layer and the interior triangles.\n"
+                                  "Used by the Smooth Mesh button below.")
+
         # --- Refinement Zones Section ---
         imgui.separator()
         opened3, _ = imgui.collapsing_header("Refinement Zones", flags=imgui.TREE_NODE_DEFAULT_OPEN)
@@ -368,6 +387,16 @@ class PhysicsEditor:
             imgui.same_line()
             if imgui.button("Solve"):
                 self.pending_action = PhysicsAction.SOLVE
+        if self.has_mesh and self.mesher is not None:
+            imgui.same_line()
+            if imgui.button("Smooth Mesh"):
+                self.pending_action = PhysicsAction.SMOOTH_MESH
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Relax interior points toward their Delaunay\n"
+                                  "neighbour centroid to even out the seam between\n"
+                                  "the boundary layer and the interior triangles.\n"
+                                  "Opt-in and reversible only by re-meshing.\n"
+                                  "Passes/relaxation set under Smoothing settings above.")
         imgui.same_line()
         if imgui.button("Save Mesh"):
             self.open_save_dialog()
