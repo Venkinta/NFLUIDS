@@ -662,24 +662,34 @@ class Mesher:
             
             # Case A: Moving from an Inlet/Outlet to a Wall
             if prev_tag != 0 and current_tag == 0:
-                # Force the extrusion vector to point exactly along the previous edge (the Inlet)
-                inlet_vector = -unit_edges[(i - 1) % n]  # Pointing into the domain along the inlet
+                # Force the extrusion vector to point exactly along the previous edge (the Inlet),
+                # picking whichever of the two tangent directions actually agrees with the wall's
+                # own (already correctly-signed, see step 4) interior normal. This used to just
+                # assume -unit_edges[(i-1)%n] points into the domain, which only holds at an
+                # ordinary convex wall/inlet corner; at a concave one (e.g. an injector's side
+                # branch meeting the main channel) that assumption flips and the inlet's own
+                # boundary layer came out extruded outward. The old abs() on the projection below
+                # masked exactly this sign error instead of catching it.
+                raw_tangent = -unit_edges[(i - 1) % n]
+                wall_normal = edge_normals[i]
+                inlet_vector = raw_tangent if np.dot(raw_tangent, wall_normal) >= 0 else -raw_tangent
                 vertex_normals[i] = inlet_vector
-                
+
                 # Adjust length so the normal thickness relative to the wall remains correct
                 # For a 90-degree corner, dot product is 1.0, so length multiplier is 1.0
-                wall_normal = edge_normals[i]
-                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                projection = np.dot(inlet_vector, wall_normal)  # >= 0 by construction above
                 miter_lengths[i] = 1.0 / max(projection, 0.1)
 
             # Case B: Moving from a Wall to an Inlet/Outlet
             elif prev_tag == 0 and current_tag != 0:
-                # Force the extrusion vector to point exactly along the current edge (the Inlet)
-                inlet_vector = unit_edges[i] 
-                vertex_normals[i] = inlet_vector
-                
+                # Force the extrusion vector to point exactly along the current edge (the Inlet);
+                # see Case A above for why the sign is derived from wall_normal rather than assumed.
+                raw_tangent = unit_edges[i]
                 wall_normal = edge_normals[(i - 1) % n]
-                projection = np.abs(np.dot(inlet_vector, wall_normal))
+                inlet_vector = raw_tangent if np.dot(raw_tangent, wall_normal) >= 0 else -raw_tangent
+                vertex_normals[i] = inlet_vector
+
+                projection = np.dot(inlet_vector, wall_normal)  # >= 0 by construction above
                 miter_lengths[i] = 1.0 / max(projection, 0.1)
                 
                 # Ensure this point actually moves (it belongs to the inlet patch now, 
@@ -687,24 +697,35 @@ class Mesher:
                 current_thickness_array[i] = current_thickness_array[(i - 1) % n]
 
         # 4. Generate the new layer points.
-        # Make the extrusion direction robust to how the loop was drawn:
-        #   * outer loop  -> grow toward the loop centroid (into the domain)
-        #   * hole loop   -> grow away from the loop centroid (also into the
-        #                    domain, since the fluid surrounds the hole)
-        # This avoids depending on the user drawing holes in a particular
-        # winding order.
+        # vertex_normals is built purely from this loop's own edge_normals
+        # (step 1, signed by self.orientation, which is measured fresh per
+        # loop) plus the inlet/outlet corner overrides above — so it already
+        # points into *this loop's own interior* everywhere, including at
+        # reflex/concave corners: averaging two same-sense edge normals can
+        # never flip past either one, it just needs a longer miter (clamped
+        # by cos_theta above) at sharp corners. That's true regardless of
+        # winding direction or convexity.
+        #
+        # An outer loop's "own interior" is the fluid domain, so its
+        # displacement is used as-is. A hole's "own interior" is the solid
+        # obstacle, so the fluid is on the *other* side — a hole's
+        # displacement is negated wholesale via extrude_toward_interior.
+        #
+        # This used to be a per-vertex check against the loop centroid
+        # (flip displacement[i] if it pointed away from `centroid -
+        # polygon_points[i]`), meant to make the outer/hole flip robust to
+        # however the user drew the loop. But "distance to the single
+        # centroid point" isn't a valid interior/exterior test on a concave
+        # outline — near a reflex corner the straight line to the centroid
+        # can leave the domain and re-enter it, so the check would fire on
+        # an already-correct displacement and flip it outward (e.g. an
+        # ink-injector shape with a concave junction had two walls come out
+        # with outward-facing prism layers). Since the per-vertex normal is
+        # already correctly signed on its own, no geometric re-check is
+        # needed — just apply the static outer/hole sign.
         displacement = vertex_normals * (miter_lengths * current_thickness_array)
-        centroid = np.mean(polygon_points, axis=0)
-        to_centroid = centroid - polygon_points
-        for i in range(n):
-            d = displacement[i]
-            toward = np.dot(d, to_centroid[i])
-            if extrude_toward_interior:
-                if toward < 0:
-                    displacement[i] = -d
-            else:
-                if toward > 0:
-                    displacement[i] = -d
+        if not extrude_toward_interior:
+            displacement = -displacement
         new_points = polygon_points + displacement
         return new_points
 
