@@ -1,4 +1,5 @@
 import math
+import queue
 import numpy as np
 from .line import Line
 from matplotlib.path import Path
@@ -13,6 +14,27 @@ from .mesh_quality import seam_quality
 from .renderer import VboHandle
 import time
 from OpenGL.GL import *
+
+
+class MeshingCancelled(Exception):
+    """Raised inside Mesher.mesh() when a stop_event fires mid-build."""
+    pass
+
+
+def _push_latest(q, item):
+    """Put `item` on a maxsize=1 queue, dropping the old item if full.
+
+    Mirrors the drop-and-replace pattern SolverPanel uses for its viz
+    queue (solver_panel.py) -- only the latest snapshot matters, older
+    ones are discarded rather than blocking the producer.
+    """
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        try:    q.get_nowait()
+        except queue.Empty: pass
+        try:    q.put_nowait(item)
+        except queue.Full:  pass
 
 
 class Mesher:
@@ -56,11 +78,38 @@ class Mesher:
         # Refinement zones: list of (shapely_polygon, factor)
         self.refinement_zones = refinement_zones if refinement_zones is not None else []
 
-    def mesh(self):
+    def mesh(self, progress_queue=None, stop_event=None):
+        """Run the full meshing pipeline.
+
+        progress_queue: optional queue.Queue(maxsize=1). Receives
+        {'label': str, 'bundles': dict|None} at each stage transition --
+        `label` always describes the stage about to RUN (not the one that
+        just finished, so a slow stage doesn't sit there showing a stale
+        "finished" label the whole time it's working), and `bundles` (this
+        stage's get_render_data(), GL-free), when present, is the geometry
+        that just became available. The two are combined into one push per
+        transition rather than two back-to-back ones, since a maxsize=1
+        queue would otherwise let the second push silently discard the
+        first before the main thread ever drains it. Lets a caller
+        (MesherPanel) show a live build preview without this method
+        knowing anything about threads, GL, or panels.
+
+        stop_event: optional threading.Event, checked between stages. If
+        set, raises MeshingCancelled so a worker-thread caller can unwind
+        cleanly. Both params default to None so headless/script callers
+        (test_holes.py, test_force_balance.py, etc.) are unaffected.
+        """
+        def _checkpoint(label, bundles=None):
+            if stop_event is not None and stop_event.is_set():
+                raise MeshingCancelled()
+            if progress_queue is not None:
+                _push_latest(progress_queue, {'label': label, 'bundles': bundles})
+
         t_total = time.perf_counter()
         print("\n" + "="*50)
         print("  MESHER  —  starting pipeline")
         print("="*50)
+        _checkpoint("Ordering the CAD polygon…")
 
         # 1. Group the CAD lines into separate closed loops (outer + holes)
         t = time.perf_counter()
@@ -68,6 +117,7 @@ class Mesher:
         n_edges = sum(len(l) for l in self.loops)
         print(f"[1/7] Polygon ordering      {time.perf_counter()-t:6.3f}s  "
               f"({n_edges} edges across {len(self.loops)} loops)")
+        _checkpoint("Computing loop orientation…")
 
         # 2. Per-loop orientation; the loop with the largest absolute area is
         #    the outer boundary, the rest are holes.
@@ -81,6 +131,7 @@ class Mesher:
         windings = ["CW" if o > 0 else "CCW" for o in self.loop_orientations]
         print(f"[2/7] Orientation           {time.perf_counter()-t:6.3f}s  "
               f"(outer=loop {self.outer_idx}; " + ", ".join(windings) + ")")
+        _checkpoint("Sampling boundary points…")
 
         # 3. High-res boundary points, sampled per loop then concatenated
         t = time.perf_counter()
@@ -105,6 +156,7 @@ class Mesher:
                                   else np.concatenate([self.point_bc_mask, bm]))
         print(f"[3/7] Boundary points       {time.perf_counter()-t:6.3f}s  "
               f"({len(self.boundary_points)} pts)")
+        _checkpoint("Extruding boundary layers…")
 
         # 4. Boundary layers — extrude each loop independently.  The outer
         #    loop grows toward its interior (the domain); holes grow toward
@@ -136,14 +188,21 @@ class Mesher:
             self.boundary_elements.extend(self.connect_layers(stack))
         print(f"[4/7] Boundary layers       {time.perf_counter()-t:6.3f}s  "
               f"({self.n_layers} layers × {len(self.loops)} loops)")
+        # Combined into one push: boundary-layer geometry just became
+        # available (bundles), and Steiner placement is what's about to run
+        # (label) -- pushing these as two separate messages back-to-back
+        # would let the second silently discard the first on this
+        # maxsize=1 queue before the main thread ever drains it.
+        _checkpoint("Placing Steiner points…", bundles=self.get_render_data())
 
         # 5. Steiner points for the interior (domain may contain holes)
         t = time.perf_counter()
         inner_rings = [stack[-1] for stack in self.loop_layer_stacks]
-        self.create_steiner_points(inner_rings, self.r)
+        self.create_steiner_points(inner_rings, self.r, stop_event=stop_event)
         n_steiner = (len(self.points) if self.points is not None
                      and len(self.points) > 0 else 0)
         print(f"[6/7] Steiner points        {time.perf_counter()-t:6.3f}s  ({n_steiner} interior pts)")
+        _checkpoint(f"Triangulating {n_steiner} interior points…")
 
         # 6. Bowyer-Watson triangulation + filter (compound region)
         t = time.perf_counter()
@@ -166,6 +225,9 @@ class Mesher:
         elapsed = time.perf_counter() - t
         print(f"      Bowyer-Watson done     {elapsed:6.3f}s  "
               f"({n_raw} raw → {n_final} kept after filter)")
+        # Final push -- nothing left to run after this, so the label is a
+        # completion state rather than "about to run" like the others above.
+        _checkpoint("Mesh complete", bundles=self.get_render_data())
 
         print("-"*50)
         print(f"  Total meshing time: {time.perf_counter()-t_total:.3f}s")
@@ -173,7 +235,8 @@ class Mesher:
         print(f"  Grand total: {n_final + len(self.boundary_elements)} cells")
         print("="*50 + "\n")
 
-    def smooth_mesh(self, passes=3, relaxation=0.5, tolerance_deg=1.0):
+    def smooth_mesh(self, passes=3, relaxation=0.5, tolerance_deg=1.0,
+                     progress_queue=None, stop_event=None):
         """Opt-in Laplacian smoothing of the interior Steiner points.
 
         Moves each Steiner point toward the centroid of its Delaunay
@@ -193,6 +256,15 @@ class Mesher:
         tolerance is discarded and the loop stops there, since a
         deterministic relaxation would just reproduce the same result on
         any further attempt.
+
+        progress_queue/stop_event: same optional hooks as mesh() -- a
+        maxsize=1 queue.Queue receiving {'label', 'bundles'} after each
+        committed pass, and a threading.Event checked BETWEEN passes (not
+        mid-pass, since each pass is already atomic: build candidate ->
+        filter -> compare -> commit-or-revert). A between-pass stop just
+        breaks the loop early -- unlike mesh(), there's no MeshingCancelled
+        here, since whatever's already committed is always a fully valid
+        triangulation, the same as any other early-exit in this loop.
         """
         if self.triangulation is None or not self.loop_layer_stacks:
             raise RuntimeError("smooth_mesh() requires an existing mesh; call mesh() first.")
@@ -205,6 +277,9 @@ class Mesher:
         passes_done = 0
 
         for _ in range(passes):
+            if stop_event is not None and stop_event.is_set():
+                break
+
             adjacency = {}
             for t in self.triangulation.triangles:
                 for edge in t.edges():
@@ -249,6 +324,12 @@ class Mesher:
                 quality = new_quality
                 best_quality = max(best_quality, new_quality)
                 passes_done += 1
+                if progress_queue is not None:
+                    _push_latest(progress_queue, {
+                        'label': f'Smoothing: pass {passes_done}/{passes} '
+                                 f'(worst seam angle {quality:.1f} deg)',
+                        'bundles': self.get_render_data(),
+                    })
             else:
                 self.triangulation = prev_triangulation
                 break
@@ -393,7 +474,7 @@ class Mesher:
     
         return local_refined * (1.0 - smooth_t) + base_r * smooth_t
     
-    def create_steiner_points(self, inner_rings, r=4.0, k=30):
+    def create_steiner_points(self, inner_rings, r=4.0, k=30, stop_event=None):
         """Sample interior Steiner points for a domain that may contain holes.
     
         `inner_rings` is a list of Nx2 arrays, one per loop, where
@@ -410,6 +491,14 @@ class Mesher:
         Performance: `inside_grid` and `radius_grid` are precomputed once over
         the background grid before the Poisson-disk loop begins, replacing the
         per-candidate Shapely calls that dominated runtime at large point counts.
+
+        stop_event: optional threading.Event, checked every iteration of the
+        main Poisson-disk `while active:` loop below (cheap -- a single flag
+        read). This stage is by far the most likely single bottleneck for a
+        fine mesh (measured: 39s for a ~96k-point case) and, unlike the rest
+        of mesh()'s stage-boundary checkpoints, has no natural sub-stage
+        checkpoint of its own -- without this, Cancel would have to wait out
+        the entire stage before taking effect, defeating the point.
         """
         if not inner_rings or len(inner_rings[self.outer_idx]) < 3:
             raise ValueError("Boundary polygon not defined properly.")
@@ -544,6 +633,8 @@ class Mesher:
         # Both are now O(1) numpy array lookups.
         # ------------------------------------------------------------------
         while active:
+            if stop_event is not None and stop_event.is_set():
+                raise MeshingCancelled()
             idx        = np.random.randint(len(active))
             base_point = active[idx]
             found      = False
