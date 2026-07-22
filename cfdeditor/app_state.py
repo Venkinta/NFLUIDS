@@ -6,6 +6,7 @@ import numpy as np
 from .line import Line
 from .point import Point
 from .mesher import Mesher
+from .mesher_panel import MesherPanel
 from .solver import Solver
 from .solver_panel import SolverPanel
 from .physics_editor import PhysicsEditor, PhysicsAction
@@ -14,10 +15,11 @@ from .visualizer import Visualizer
 
 class AppState(Enum):
     """The app's top-level states, in their usual transition order:
-    EDITOR -> PHYSICS <-> SOLVING -> VISUALIZER -> PHYSICS.
+    EDITOR -> PHYSICS <-> MESHING, PHYSICS <-> SOLVING -> VISUALIZER -> PHYSICS.
     """
     EDITOR = auto()
     PHYSICS = auto()
+    MESHING = auto()
     SOLVING = auto()
     VISUALIZER = auto()
 
@@ -37,6 +39,7 @@ class AppContext:
     vbos: dict = field(default_factory=dict)
     physicseditor: object = None
     mesher: object = None
+    mesher_panel: object = None
     solver: object = None          # kept alive across SOLVING and VISUALIZER
     solver_panel: object = None
     visualizer: object = None
@@ -162,7 +165,7 @@ def update_physics(ctx):
     action = physicseditor.pending_action
     physicseditor.pending_action = None
 
-    # --- Mesh / Remesh ---
+    # --- Mesh / Remesh → launch threaded MesherPanel ---
     if action == PhysicsAction.MESH:
         refinement_zones = physicseditor._get_refinement_polygons()
         mesher = Mesher(
@@ -173,21 +176,19 @@ def update_physics(ctx):
             refinement_zones=refinement_zones,
             bc_spacing_map=physicseditor._bc_spacing
         )
-        mesher.mesh()
-
-        ctx.vbos = mesher.rebuild_wireframe_vbos(ctx.vbos)
-        physicseditor.has_mesh = True
-        physicseditor.mesher = mesher
-        physicseditor.loaded_mesh = None  # invalidate stale loaded mesh so Solve uses this fresh remesh
-        ctx.mesher = mesher
+        # Clear the old wireframe immediately -- the new mesh builds live
+        # from an empty view rather than leaving the stale one on screen.
+        ctx.vbos = Mesher.upload_wireframe_bundles(ctx.vbos, {})
+        ctx.mesher_panel = MesherPanel(mesher, mode='mesh')
+        return AppState.MESHING
 
     # --- Smooth the current mesh in place (opt-in, no full remesh) ---
     elif action == PhysicsAction.SMOOTH_MESH:
-        physicseditor.mesher.smooth_mesh(
-            passes=physicseditor.smooth_passes,
-            relaxation=physicseditor.smooth_relaxation)
-        ctx.vbos = physicseditor.mesher.rebuild_wireframe_vbos(ctx.vbos)
-        physicseditor.loaded_mesh = None  # stale after in-place smoothing
+        ctx.mesher_panel = MesherPanel(
+            physicseditor.mesher, mode='smooth',
+            smooth_kwargs=dict(passes=physicseditor.smooth_passes,
+                                relaxation=physicseditor.smooth_relaxation))
+        return AppState.MESHING
 
     # --- Load saved mesh (.npz) ---
     elif action == PhysicsAction.LOAD_MESH:
@@ -255,6 +256,55 @@ def update_physics(ctx):
     return AppState.PHYSICS
 
 
+def update_meshing(ctx):
+    """MESHING → PHYSICS once the background MesherPanel finishes.
+
+    Mirrors update_solving()'s structure: reads mesher_panel.state /
+    .latest_bundles as set by the *previous* frame's render_meshing() ->
+    panel.draw() -> _drain() call (draining only happens in draw(), same
+    one-frame-lag as the solver's viz_snapshot).
+    """
+    panel = ctx.mesher_panel
+
+    if panel.state == 'RUNNING':
+        if panel.latest_bundles is not None:
+            bundles = panel.latest_bundles
+            panel.latest_bundles = None
+            ctx.vbos = Mesher.upload_wireframe_bundles(ctx.vbos, bundles)
+        return AppState.MESHING
+
+    physicseditor = ctx.physicseditor
+
+    if panel.state == 'DONE':
+        mesher = panel.mesher
+        ctx.vbos = mesher.rebuild_wireframe_vbos(ctx.vbos)  # final, authoritative
+        if panel.mode == 'mesh':
+            physicseditor.has_mesh = True
+            physicseditor.mesher   = mesher
+            ctx.mesher              = mesher
+        physicseditor.loaded_mesh = None  # stale after a fresh mesh/smooth
+    elif panel.state == 'CANCELLED':
+        print(f"[MesherPanel] {panel.mode} cancelled by user.")
+        if panel.mode == 'mesh':
+            # A cancelled fresh mesh is genuinely incomplete geometry --
+            # don't leave has_mesh/mesher pointing at a half-built Mesher.
+            physicseditor.has_mesh = False
+            physicseditor.mesher   = None
+            ctx.mesher              = None
+        # 'smooth' mode: passes are atomic, so whatever committed before
+        # the cancel is still a fully valid mesh -- has_mesh/mesher stay as-is.
+        physicseditor.loaded_mesh = None
+    elif panel.state == 'ERROR':
+        print(f"[MesherPanel] {panel.mode} failed: {panel.error_message}")
+        if panel.mode == 'mesh':
+            physicseditor.has_mesh = False
+            physicseditor.mesher   = None
+            ctx.mesher              = None
+
+    ctx.mesher_panel = None
+    return AppState.PHYSICS
+
+
 def update_solving(ctx):
     """SOLVING → VISUALIZER when user clicks "Open Visualizer"."""
     if not ctx.solver_panel.finished:
@@ -296,6 +346,7 @@ def update_visualizer(ctx):
 UPDATE_HANDLERS = {
     AppState.EDITOR: update_editor,
     AppState.PHYSICS: update_physics,
+    AppState.MESHING: update_meshing,
     AppState.SOLVING: update_solving,
     AppState.VISUALIZER: update_visualizer,
 }
@@ -313,6 +364,13 @@ def render_physics(ctx, dt):
     ctx.physicseditor.draw(ctx.gfx, ctx.vbos)
 
 
+def render_meshing(ctx, dt):
+    ctx.gfx.draw_vbo(ctx.vbos.get('triangles'), color=(0, 100, 255))
+    ctx.gfx.draw_vbo(ctx.vbos.get('quads'), color=(0, 255, 100))
+    ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
+    ctx.mesher_panel.draw()
+
+
 def render_solving(ctx, dt):
     ctx.live_field.draw_geometry(ctx.gfx)
     ctx.gfx.draw_vbo(ctx.vbos.get('walls'), color=(255, 255, 255))
@@ -326,6 +384,7 @@ def render_visualizer(ctx, dt):
 RENDER_HANDLERS = {
     AppState.EDITOR: render_editor,
     AppState.PHYSICS: render_physics,
+    AppState.MESHING: render_meshing,
     AppState.SOLVING: render_solving,
     AppState.VISUALIZER: render_visualizer,
 }
