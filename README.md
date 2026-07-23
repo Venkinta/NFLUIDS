@@ -137,6 +137,33 @@ A live **Solver Monitor** panel shows continuity and momentum RMS residual plots
 - Log-scale residual visualization for error analysis
 - OpenGL VBO-based rendering for large meshes
 
+## Scripting / Parametric Studies
+
+The mesh + solve pipeline is fully headless — no GUI or OpenGL context required. `cfdeditor/api.py` exposes it as a single call:
+
+```python
+from cfdeditor.geometry_helpers import rect_lines
+from cfdeditor.api import run_solve
+
+lines = rect_lines(0, 0, 600, 100, {
+    0: "Wall", 1: "Pressure Outlet", 2: "Wall", 3: "Velocity Inlet",
+})
+handle = run_solve(
+    lines,
+    mesh_params=dict(n_layers=3, growth_factor=1.2, thickness=1.0,
+                      spacing=5.0, r=4.0, unit_to_meters=0.001),
+    solver_params=dict(inlet_velocity=[0.1, 0.0], outlet_pressure=0.0,
+                        rho=1000.0, viscosity=1.0),
+)
+print(handle.results.P.mean())
+handle.export_vtu("case1.vtu")
+```
+
+- `cfdeditor/geometry_helpers.py` builds CAD-style geometry (lists of `Line`) without the editor: `rect_lines()`, `circle_lines()` (a circular hole/obstacle), `polygon_lines()` (arbitrary closed polygon).
+- `run_solve()` returns a `SolveHandle` bundling the `SolverResults` (`U`, `P`, `res_cont`, `res_mom`) with the underlying mesh data, with `.export_vtu()`, `.save_mesh()`, and `.save_results()` convenience methods — handy for sweeping a parameter and dumping one file per case.
+- Raises `SolveDiverged` if the solve fails before producing valid results, rather than returning empty/garbage arrays. A missing/unexpected key in `mesh_params`/`solver_params` also raises immediately (naming the bad key), instead of failing deep inside `Mesher`/`Solver`.
+- Pass `verbose=False` to `run_solve()` to suppress the mesh/solve stage-by-stage console output — handy when running many cases in a sweep.
+
 ## Dependencies
 
 | Package | Purpose |
@@ -175,8 +202,10 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `bowyerwatson.py` | Delaunay triangulation algorithm |
 | `constructor.py` | Numba JIT kernels and geometry helpers |
 | `snapengine.py` | Vertex and axis snapping |
-| `meshIO.py` | Save/Load mesh (and, via the same generic dict format, full visualizations) to/from compressed `.npz` files |
+| `meshIO.py` | Save/Load mesh (and, via the same generic dict format, full visualizations) to/from compressed `.npz` files; also save/load a solve's `SolverResults` on its own |
 | `vtuIO.py` | Export mesh + solved fields as a VTK XML UnstructuredGrid (`.vtu`), for cross-validation in ParaView/other CFD codes |
+| `api.py` | Headless scripting entry point: `run_solve()` wraps Mesher → Solver → results for parametric studies |
+| `geometry_helpers.py` | CAD-free geometry builders (`rect_lines`, `circle_lines`, `polygon_lines`) for scripting |
 | `test_holes.py` | End-to-end test for multi-loop meshing with holes |
 | `test_force_balance.py` | Regression test: discrete force/mass balance on a solved channel |
 | `test_state_transitions.py` | Characterization test for the `AppState` transition graph |

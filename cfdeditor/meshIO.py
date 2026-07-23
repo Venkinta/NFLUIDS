@@ -1,5 +1,7 @@
 import numpy as np
 
+from .solver_protocol import SolverResults
+
 
 def save_mesh_for_solver(mesh_data, filepath):
     """Dumps the solver dictionary to a compressed .npz file.
@@ -27,3 +29,26 @@ def load_mesh_for_solver(filepath):
 
     print(f"[IO] Mesh successfully loaded from {filepath} ({data['Nc']} cells, {data['Nf']} faces)")
     return data
+
+
+def save_results(results, filepath):
+    """Dumps a SolverResults (U, P, res_cont, res_mom, extra) to a compressed
+    .npz file, for persisting per-case results in a parametric study.
+    """
+    np.savez_compressed(
+        filepath,
+        U=results.U, P=results.P,
+        res_cont=results.res_cont, res_mom=results.res_mom,
+        extra=np.array(results.extra, dtype=object),
+    )
+    print(f"[IO] Results successfully exported to {filepath}")
+
+
+def load_results(filepath):
+    """Loads a SolverResults previously saved with save_results()."""
+    with np.load(filepath, allow_pickle=True) as loaded:
+        return SolverResults(
+            U=loaded['U'], P=loaded['P'],
+            res_cont=loaded['res_cont'], res_mom=loaded['res_mom'],
+            extra=loaded['extra'].item(),
+        )

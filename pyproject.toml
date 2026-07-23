@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfdeditor"
-version = "1.10.1"
-description = "Interactive 2D CFD Solver with CAD Frontend — Mesh generation and smoothing now run on a worker thread with a live, cancellable build preview"
+version = "1.11.0"
+description = "Interactive 2D CFD Solver with CAD Frontend — headless scripting API for parametric studies (run_solve, geometry helpers, results save/load)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
