@@ -76,16 +76,19 @@ def _apply_loaded_mesh_settings(physicseditor, loaded, vbos):
             physicseditor._unit_idx = i
             break
 
+    # A mesh built via the scripting API (cfdeditor.api.run_solve) may never
+    # have specified a bc_spacing_map, leaving it {} — without backfilling
+    # every known BC type here, the per-BC spacing UI has nothing to iterate
+    # over once "Linked spacing" is unchecked (no rows, no textboxes at all).
+    loaded_bc_spacing = {}
     if 'bc_spacing_map' in loaded:
-        physicseditor._bc_spacing = loaded['bc_spacing_map'].item()
-        physicseditor._spacing_linked = False
-        vals = list(physicseditor._bc_spacing.values())
-        if len(set(round(v, 9) for v in vals)) == 1:
-            physicseditor._spacing_linked = True
-    else:
-        for k in physicseditor._bc_spacing:
-            physicseditor._bc_spacing[k] = physicseditor.boundary_spacing
-        physicseditor._spacing_linked = True
+        raw = loaded['bc_spacing_map'].item()
+        if isinstance(raw, dict):
+            loaded_bc_spacing = raw
+    for k in physicseditor._bc_spacing:
+        physicseditor._bc_spacing[k] = float(loaded_bc_spacing.get(k, physicseditor.boundary_spacing))
+    vals = list(physicseditor._bc_spacing.values())
+    physicseditor._spacing_linked = len(set(round(v, 9) for v in vals)) == 1
 
     if 'refinement_zones' in loaded:
         zones = []
