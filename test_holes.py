@@ -8,37 +8,19 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from cfdeditor.point import Point
-from cfdeditor.line import Line
 from cfdeditor.mesher import Mesher
 from cfdeditor.solver import Solver
-
-
-def rect_lines(x0, y0, x1, y1, bc_map):
-    """Build 4 Lines forming a closed rectangle, with per-edge BC types.
-
-    bc_map: dict mapping edge index (0=left,1=top,2=right,3=bottom) -> type.
-    """
-    bl = Point(x0, y0)
-    br = Point(x1, y0)
-    tr = Point(x1, y1)
-    tl = Point(x0, y1)
-    edges = [(bl, br), (br, tr), (tr, tl), (tl, bl)]
-    lines = []
-    for i, (a, b) in enumerate(edges):
-        ln = Line(a, b)
-        ln.boundary_type = bc_map[i]
-        lines.append(ln)
-    return lines
+from cfdeditor.geometry_helpers import rect_lines
 
 
 def main():
     # Outer domain 0..200 x 0..100 (world units, mm scale)
+    # rect_lines edge order: 0=bottom, 1=right, 2=top, 3=left.
     outer = rect_lines(0, 0, 200, 100, {
-        0: "Velocity Inlet",   # left
-        1: "Wall",             # top
-        2: "Pressure Outlet",  # right
-        3: "Wall",             # bottom
+        0: "Wall",             # bottom
+        1: "Pressure Outlet",  # right
+        2: "Wall",             # top
+        3: "Velocity Inlet",   # left
     })
     # Inner hole (wing) 80..120 x 40..60
     hole = rect_lines(80, 40, 120, 60, {

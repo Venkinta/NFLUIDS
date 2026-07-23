@@ -26,10 +26,9 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from cfdeditor.point import Point
-from cfdeditor.line import Line
 from cfdeditor.mesher import Mesher
 from cfdeditor.solver import Solver
+from cfdeditor.geometry_helpers import rect_lines
 
 # Same fluid as the Poiseuille validation suite (validation/poiseuille_config.m)
 MU, RHO = 1.0, 1000.0
@@ -57,21 +56,6 @@ FIT_HI = L - 0.10 * L
 MASS_ERROR_MAX_PCT = 1.0
 FORCE_BALANCE_MAX_PCT = 3.0
 DPDX_THEORY_MAX_PCT = 10.0
-
-
-def rect_lines(x0, y0, x1, y1, bc_map):
-    """bc_map keys index the actual edge order below: 0=bottom, 1=right,
-    2=top, 3=left (NOT left/top/right/bottom -- test_holes.py's identical
-    helper has a stale comment claiming that order; verified by inspecting
-    boundary_tags counts on a real mesh before trusting it here)."""
-    bl, br, tr, tl = Point(x0, y0), Point(x1, y0), Point(x1, y1), Point(x0, y1)
-    edges = [(bl, br), (br, tr), (tr, tl), (tl, bl)]
-    lines = []
-    for i, (a, b) in enumerate(edges):
-        ln = Line(a, b)
-        ln.boundary_type = bc_map[i]
-        lines.append(ln)
-    return lines
 
 
 def main():
