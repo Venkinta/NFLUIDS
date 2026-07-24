@@ -183,7 +183,7 @@ class PhysicsEditor:
         # Auto-fit to content, but cap height so it can't grow past the
         # screen on tall control lists (refinement zones, solver settings).
         max_h = imgui.get_io().display_size[1] * 0.9
-        imgui.set_next_window_size_constraints((0, 0), (480, max_h))
+        imgui.set_next_window_size_constraints((0, 0), (620, max_h))
         imgui.begin("Mesher Settings", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)
 
         changed_u, self._unit_idx = imgui.combo("World units", self._unit_idx, self._unit_names)
@@ -192,192 +192,205 @@ class PhysicsEditor:
 
         imgui.separator()
 
-        imgui.text("Fluid Properties")
-        _, self.density = imgui.input_float("Density [kg/m3]", self.density, step=0.1, format="%.3f")
-        _, self.viscosity = imgui.input_float("Dynamic Viscosity [Pa*s]", self.viscosity, format="%.3e")
+        # ---- Tabbed sections (v1.12.0) ----
+        # Previously one long vertical stack of collapsing headers covering
+        # unrelated concerns (fluid, mesh, solver) — finding a control meant
+        # scrolling past all the others. Tabs group by concern instead; each
+        # tab's own content still uses collapsing headers where it's long
+        # enough to benefit (Mesh tab), left flat where it isn't (Solver).
+        if imgui.begin_tab_bar("physics_editor_tabs"):
 
-        # --- New Validation Section ---
-        imgui.separator()
-        imgui.text("Validation Checks")
+            if imgui.begin_tab_item("Fluid")[0]:
+                imgui.text("Fluid Properties")
+                _, self.density = imgui.input_float("Density [kg/m3]", self.density, step=0.1, format="%.3f")
+                _, self.viscosity = imgui.input_float("Dynamic Viscosity [Pa*s]", self.viscosity, format="%.3e")
 
-        # Let the user define the characteristic length (L)
-        _, self.char_length = imgui.input_float(f"Char. Length [{u}]", self.char_length, step=0.1)
+                imgui.separator()
+                imgui.text("Validation Checks")
 
-        # Calculate Reynolds: Re = (rho * V * L) / mu
-        # Note: we multiply char_length by unit_to_meters to keep the math in SI
-        world_L = self.char_length * self.unit_to_meters
-        reynolds = (self.density * self.inlet_velocity * world_L) / max(self.viscosity, 1e-12)
+                # Let the user define the characteristic length (L)
+                _, self.char_length = imgui.input_float(f"Char. Length [{u}]", self.char_length, step=0.1)
 
-        imgui.text(f"Reynolds Number: {reynolds:.2e}")
+                # Calculate Reynolds: Re = (rho * V * L) / mu
+                # Note: we multiply char_length by unit_to_meters to keep the math in SI
+                world_L = self.char_length * self.unit_to_meters
+                reynolds = (self.density * self.inlet_velocity * world_L) / max(self.viscosity, 1e-12)
 
-        # DNS Estimator 
-        if reynolds > 0:
-            # 2D DNS grid scaling is linear with Re due to the enstrophy dissipation scale
-            dns_cells = reynolds 
-            
-            if dns_cells > 5e6: # 5 Million cells is getting heavy for an interactive 2D solver
-                imgui.text_colored(f"Est. 2D DNS Cells: {dns_cells:.2e} (High for real-time)", 1.0, 0.4, 0.4)
-            else:
-                imgui.text(f"Est. 2D DNS Cells: {dns_cells:.2e}")
-        imgui.separator()
+                imgui.text(f"Reynolds Number: {reynolds:.2e}")
 
-        opened, _ = imgui.collapsing_header("Boundary layer settings")
-        if opened:
-            _, self.n_layers         = imgui.input_int(  "N. Boundary layers",           self.n_layers,         step=1,   step_fast=1)
-            _, self.growth_factor    = imgui.input_float("Growth factor",                 self.growth_factor,    step=0.05, step_fast=1.0)
-            _, self.thickness        = imgui.input_float(f"First layer thickness [{u}]",  self.thickness,        step=0.25, step_fast=5.0)
+                # DNS Estimator
+                if reynolds > 0:
+                    # 2D DNS grid scaling is linear with Re due to the enstrophy dissipation scale
+                    dns_cells = reynolds
 
-            # --- Per-BC boundary cell spacing ---
-            imgui.separator()
-            _, self._spacing_linked = imgui.checkbox("Linked spacing (all BCs)", self._spacing_linked)
-            if self._spacing_linked:
-                changed, self.boundary_spacing = imgui.input_float(
-                    f"Boundary cell spacing [{u}]", self.boundary_spacing,
-                    step=0.5, step_fast=10.0)
-                if changed:
-                    # Propagate global value to all BC types
-                    for k in self._bc_spacing:
-                        self._bc_spacing[k] = self.boundary_spacing
-            else:
-                # Show individual per-BC spacing fields
-                for bc_type in sorted(self._bc_spacing.keys()):
-                    label = f"{bc_type} spacing [{u}]"
-                    changed, val = imgui.input_float(label, self._bc_spacing[bc_type],
-                                                     step=0.5, step_fast=10.0)
-                    if changed:
-                        self._bc_spacing[bc_type] = max(0.1, val)
-                if imgui.button("Reset all to global"):
-                    for k in self._bc_spacing:
-                        self._bc_spacing[k] = self.boundary_spacing
+                    if dns_cells > 5e6: # 5 Million cells is getting heavy for an interactive 2D solver
+                        imgui.text_colored(f"Est. 2D DNS Cells: {dns_cells:.2e} (High for real-time)", 1.0, 0.4, 0.4)
+                    else:
+                        imgui.text(f"Est. 2D DNS Cells: {dns_cells:.2e}")
 
-        opened2, _ = imgui.collapsing_header("Mesher settings")
-        if opened2:
-            _, self.r = imgui.input_float(f"Mesh size (min sep.) [{u}]", self.r, step=1.0, step_fast=10.0)
+                imgui.end_tab_item()
 
-        opened_sm, _ = imgui.collapsing_header("Smoothing settings")
-        if opened_sm:
-            imgui.push_item_width(160)
-            _, self.smooth_passes = imgui.input_int("Passes", self.smooth_passes, step=1)
-            self.smooth_passes = max(1, min(self.smooth_passes, 10))
-            _, self.smooth_relaxation = imgui.slider_float(
-                "Relaxation", self.smooth_relaxation, 0.05, 1.0)
-            imgui.pop_item_width()
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Relax interior points toward their Delaunay\n"
-                                  "neighbour centroid to even out the seam between\n"
-                                  "the boundary layer and the interior triangles.\n"
-                                  "Used by the Smooth Mesh button below.")
+            if imgui.begin_tab_item("Mesh")[0]:
+                opened, _ = imgui.collapsing_header("Boundary layer settings")
+                if opened:
+                    _, self.n_layers         = imgui.input_int(  "N. Boundary layers",           self.n_layers,         step=1,   step_fast=1)
+                    _, self.growth_factor    = imgui.input_float("Growth factor",                 self.growth_factor,    step=0.05, step_fast=1.0)
+                    _, self.thickness        = imgui.input_float(f"First layer thickness [{u}]",  self.thickness,        step=0.25, step_fast=5.0)
 
-        # --- Refinement Zones Section ---
-        imgui.separator()
-        opened3, _ = imgui.collapsing_header("Refinement Zones", flags=imgui.TREE_NODE_DEFAULT_OPEN)
-        if opened3:
-            # Draw the list of existing zones
-            to_remove = None
-            for i, zone in enumerate(self.refinement_zones):
-                x1, y1, x2, y2 = zone['rect']
-                rx1, rx2 = min(x1, x2), max(x1, x2)
-                ry1, ry2 = min(y1, y2), max(y1, y2)
-                w = rx2 - rx1
-                h = ry2 - ry1
-                # Delete button on the left, always visible
-                imgui.push_style_color(imgui.COLOR_BUTTON, 0.8, 0.2, 0.2, 1.0)
-                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 1.0, 0.3, 0.3, 1.0)
-                if imgui.button(f" X ##del_{i}"):
-                    to_remove = i
-                imgui.pop_style_color(2)
-                imgui.same_line()
-                imgui.text(f"Zone {i+1}:")
-                
-                imgui.same_line()
-                imgui.push_item_width(140)
-                _, zone['factor'] = imgui.input_float(f"##factor_{i}", zone['factor'], step=0.5, step_fast=1.0)
-                imgui.pop_item_width()
-                zone['factor'] = max(1.1, zone['factor'])
-                
-                imgui.same_line()
-                imgui.text_colored(f"({self.r / zone['factor']:.1f}{u})", 0.6, 1.0, 0.6, 1.0)
-                
-                # Buffer multiplier per zone
-                bm = zone.get('buffer_mult', 5.0)
-                imgui.same_line()
-                imgui.push_item_width(140)
-                _, zone['buffer_mult'] = imgui.input_float(f"##buf_{i}", bm, step=0.5, step_fast=1.0)
-                imgui.pop_item_width()
-                zone['buffer_mult'] = max(1.0, zone['buffer_mult'])
-                
-                imgui.same_line()
-                local_r = self.r / zone['factor']
-                imgui.text_colored(f"buf:{zone['buffer_mult'] * local_r:.1f}{u}", 0.6, 1.0, 0.6, 1.0)
+                    # --- Per-BC boundary cell spacing ---
+                    imgui.separator()
+                    _, self._spacing_linked = imgui.checkbox("Linked spacing (all BCs)", self._spacing_linked)
+                    if self._spacing_linked:
+                        changed, self.boundary_spacing = imgui.input_float(
+                            f"Boundary cell spacing [{u}]", self.boundary_spacing,
+                            step=0.5, step_fast=10.0)
+                        if changed:
+                            # Propagate global value to all BC types
+                            for k in self._bc_spacing:
+                                self._bc_spacing[k] = self.boundary_spacing
+                    else:
+                        # Show individual per-BC spacing fields
+                        for bc_type in sorted(self._bc_spacing.keys()):
+                            label = f"{bc_type} spacing [{u}]"
+                            changed, val = imgui.input_float(label, self._bc_spacing[bc_type],
+                                                             step=0.5, step_fast=10.0)
+                            if changed:
+                                self._bc_spacing[bc_type] = max(0.1, val)
+                        if imgui.button("Reset all to global"):
+                            for k in self._bc_spacing:
+                                self._bc_spacing[k] = self.boundary_spacing
 
+                opened2, _ = imgui.collapsing_header("Mesher settings")
+                if opened2:
+                    _, self.r = imgui.input_float(f"Mesh size (min sep.) [{u}]", self.r, step=1.0, step_fast=10.0)
+
+                opened_sm, _ = imgui.collapsing_header("Smoothing settings")
+                if opened_sm:
+                    imgui.push_item_width(160)
+                    _, self.smooth_passes = imgui.input_int("Passes", self.smooth_passes, step=1)
+                    self.smooth_passes = max(1, min(self.smooth_passes, 10))
+                    _, self.smooth_relaxation = imgui.slider_float(
+                        "Relaxation", self.smooth_relaxation, 0.05, 1.0)
+                    imgui.pop_item_width()
+                    if imgui.is_item_hovered():
+                        imgui.set_tooltip("Relax interior points toward their Delaunay\n"
+                                          "neighbour centroid to even out the seam between\n"
+                                          "the boundary layer and the interior triangles.\n"
+                                          "Used by the Smooth Mesh button below.")
+
+                # --- Refinement Zones Section ---
+                imgui.separator()
+                opened3, _ = imgui.collapsing_header("Refinement Zones", flags=imgui.TREE_NODE_DEFAULT_OPEN)
+                if opened3:
+                    # Draw the list of existing zones
+                    to_remove = None
+                    for i, zone in enumerate(self.refinement_zones):
+                        x1, y1, x2, y2 = zone['rect']
+                        rx1, rx2 = min(x1, x2), max(x1, x2)
+                        ry1, ry2 = min(y1, y2), max(y1, y2)
+                        w = rx2 - rx1
+                        h = ry2 - ry1
+                        # Delete button on the left, always visible
+                        imgui.push_style_color(imgui.COLOR_BUTTON, 0.8, 0.2, 0.2, 1.0)
+                        imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 1.0, 0.3, 0.3, 1.0)
+                        if imgui.button(f" X ##del_{i}"):
+                            to_remove = i
+                        imgui.pop_style_color(2)
+                        imgui.same_line()
+                        imgui.text(f"Zone {i+1}:")
+
+                        imgui.same_line()
+                        imgui.push_item_width(140)
+                        _, zone['factor'] = imgui.input_float(f"##factor_{i}", zone['factor'], step=0.5, step_fast=1.0)
+                        imgui.pop_item_width()
+                        zone['factor'] = max(1.1, zone['factor'])
+
+                        imgui.same_line()
+                        imgui.text_colored(f"({self.r / zone['factor']:.1f}{u})", 0.6, 1.0, 0.6, 1.0)
+
+                        # Buffer multiplier per zone
+                        bm = zone.get('buffer_mult', 5.0)
+                        imgui.same_line()
+                        imgui.push_item_width(140)
+                        _, zone['buffer_mult'] = imgui.input_float(f"##buf_{i}", bm, step=0.5, step_fast=1.0)
+                        imgui.pop_item_width()
+                        zone['buffer_mult'] = max(1.0, zone['buffer_mult'])
+
+                        imgui.same_line()
+                        local_r = self.r / zone['factor']
+                        imgui.text_colored(f"buf:{zone['buffer_mult'] * local_r:.1f}{u}", 0.6, 1.0, 0.6, 1.0)
+
+                        if imgui.is_item_hovered():
+                            imgui.set_tooltip(f"Rect: ({rx1:.1f}, {ry1:.1f}) to ({rx2:.1f}, {ry2:.1f}) [{w:.1f}x{h:.1f} {u}]")
+                    if to_remove is not None:
+                        self.refinement_zones.pop(to_remove)
+
+                    # "Add Refinement Zone" button / drawing mode toggle
+                    if not self._drawing_refinement:
+                        if imgui.button("Add Refinement Zone"):
+                            self._drawing_refinement = True
+                            self._refine_start = None
+                            self._refine_current = None
+                    else:
+                        imgui.text_colored("Click & drag on canvas to draw a refinement rectangle", 0.2, 1.0, 0.2, 1.0)
+                        if imgui.button("Cancel"):
+                            self._drawing_refinement = False
+                            self._refine_start = None
+                            self._refine_current = None
+
+                    _, self._refine_factor = imgui.input_float("Refinement factor", self._refine_factor, step=0.5, step_fast=1.0)
+                    self._refine_factor = max(1.1, self._refine_factor)
+                    _, self._refine_buffer_mult = imgui.input_float("Buffer multiplier", self._refine_buffer_mult, step=0.5, step_fast=1.0)
+                    self._refine_buffer_mult = max(1.0, self._refine_buffer_mult)
+
+                imgui.end_tab_item()
+
+            if imgui.begin_tab_item("Solver")[0]:
+                imgui.push_item_width(160)
+
+                _, self.alpha_u = imgui.slider_float(
+                    "alpha_u  (velocity relax.)", self.alpha_u, 0.01, 0.99, format="%.2f")
                 if imgui.is_item_hovered():
-                    imgui.set_tooltip(f"Rect: ({rx1:.1f}, {ry1:.1f}) to ({rx2:.1f}, {ry2:.1f}) [{w:.1f}x{h:.1f} {u}]")
-            if to_remove is not None:
-                self.refinement_zones.pop(to_remove)
+                    imgui.set_tooltip("Under-relaxation for U/V momentum equations.\n"
+                                      "Lower = more stable but slower convergence.\n"
+                                      "High-Re or separated flows may need 0.1–0.2.")
 
-            # "Add Refinement Zone" button / drawing mode toggle
-            if not self._drawing_refinement:
-                if imgui.button("Add Refinement Zone"):
-                    self._drawing_refinement = True
-                    self._refine_start = None
-                    self._refine_current = None
-            else:
-                imgui.text_colored("Click & drag on canvas to draw a refinement rectangle", 0.2, 1.0, 0.2, 1.0)
-                if imgui.button("Cancel"):
-                    self._drawing_refinement = False
-                    self._refine_start = None
-                    self._refine_current = None
+                _, self.alpha_p = imgui.slider_float(
+                    "alpha_p  (pressure relax.)", self.alpha_p, 0.01, 0.99, format="%.2f")
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("Under-relaxation for pressure correction.\n"
+                                      "Typically half of alpha_u. Reduce for stability.")
 
-            _, self._refine_factor = imgui.input_float("Refinement factor", self._refine_factor, step=0.5, step_fast=1.0)
-            self._refine_factor = max(1.1, self._refine_factor)
-            _, self._refine_buffer_mult = imgui.input_float("Buffer multiplier", self._refine_buffer_mult, step=0.5, step_fast=1.0)
-            self._refine_buffer_mult = max(1.0, self._refine_buffer_mult)
+                _, self.max_iterations = imgui.input_int(
+                    "Max iterations", self.max_iterations, step=100, step_fast=500)
+                self.max_iterations = max(1, self.max_iterations)
 
-        imgui.separator()
+                # Tolerance as a log10 slider: "1e-N" where N = 3..10
+                tol_exp = int(round(-np.log10(max(self.tolerance, 1e-15))))
+                tol_exp = max(3, min(tol_exp, 10))
+                changed_tol, tol_exp = imgui.slider_int(
+                    "Tolerance  (1e-N)", tol_exp, 3, 10)
+                if changed_tol:
+                    self.tolerance = 10.0 ** (-tol_exp)
+                imgui.same_line()
+                imgui.text_colored(f"= {self.tolerance:.0e}", 0.6, 1.0, 0.6, 1.0)
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("Continuity RMS residual target.\n"
+                                      "1e-4 is typical; 1e-6 for production results.")
 
-        opened_s, _ = imgui.collapsing_header("Solver Settings")
-        if opened_s:
-            imgui.push_item_width(160)
+                _, self.viz_interval = imgui.input_int(
+                    "Live viz every N iters", self.viz_interval, step=5)
+                self.viz_interval = max(1, self.viz_interval)
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("How often the background field is updated\n"
+                                      "in the Solver Monitor during a solve.\n"
+                                      "Higher = less GPU overhead during solving.")
 
-            _, self.alpha_u = imgui.slider_float(
-                "alpha_u  (velocity relax.)", self.alpha_u, 0.01, 0.99, format="%.2f")
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Under-relaxation for U/V momentum equations.\n"
-                                  "Lower = more stable but slower convergence.\n"
-                                  "High-Re or separated flows may need 0.1–0.2.")
+                imgui.pop_item_width()
 
-            _, self.alpha_p = imgui.slider_float(
-                "alpha_p  (pressure relax.)", self.alpha_p, 0.01, 0.99, format="%.2f")
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Under-relaxation for pressure correction.\n"
-                                  "Typically half of alpha_u. Reduce for stability.")
+                imgui.end_tab_item()
 
-            _, self.max_iterations = imgui.input_int(
-                "Max iterations", self.max_iterations, step=100, step_fast=500)
-            self.max_iterations = max(1, self.max_iterations)
-
-            # Tolerance as a log10 slider: "1e-N" where N = 3..10
-            tol_exp = int(round(-np.log10(max(self.tolerance, 1e-15))))
-            tol_exp = max(3, min(tol_exp, 10))
-            changed_tol, tol_exp = imgui.slider_int(
-                "Tolerance  (1e-N)", tol_exp, 3, 10)
-            if changed_tol:
-                self.tolerance = 10.0 ** (-tol_exp)
-            imgui.same_line()
-            imgui.text_colored(f"= {self.tolerance:.0e}", 0.6, 1.0, 0.6, 1.0)
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Continuity RMS residual target.\n"
-                                  "1e-4 is typical; 1e-6 for production results.")
-
-            _, self.viz_interval = imgui.input_int(
-                "Live viz every N iters", self.viz_interval, step=5)
-            self.viz_interval = max(1, self.viz_interval)
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("How often the background field is updated\n"
-                                  "in the Solver Monitor during a solve.\n"
-                                  "Higher = less GPU overhead during solving.")
-
-            imgui.pop_item_width()
+            imgui.end_tab_bar()
 
         imgui.separator()
         mesh_label = "Remesh" if self.has_mesh else "Mesh"
@@ -396,7 +409,8 @@ class PhysicsEditor:
                                   "neighbour centroid to even out the seam between\n"
                                   "the boundary layer and the interior triangles.\n"
                                   "Opt-in and reversible only by re-meshing.\n"
-                                  "Passes/relaxation set under Smoothing settings above.")
+                                  "Passes/relaxation set under the Mesh tab's\n"
+                                  "Smoothing settings above.")
         imgui.same_line()
         if imgui.button("Save Mesh"):
             self.open_save_dialog()

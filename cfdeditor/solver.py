@@ -164,6 +164,16 @@ class Solver(SolverProtocol):
         self._live_res_cont = np.zeros(self.Nc)
         self._live_res_mom  = np.zeros(self.Nc)
 
+        # Cumulative diagnostic counters, surfaced via step()'s 'diagnostics'
+        # key (read by SolverPanel) and results.extra (read by scripts).
+        # Previously these only ever reached stdout via print(), invisible
+        # to anyone driving the GUI or a headless sweep.
+        self._n_clip_events     = 0  # iterations where u*/v* clipping fired
+        self._n_clip_cells      = 0  # cumulative clipped-cell count
+        self._n_stall_mom       = 0  # momentum BiCGSTAB stalls (u + v)
+        self._n_stall_pressure  = 0  # pressure BiCGSTAB stalls
+        self._n_pressure_direct = 0  # direct-solve fallbacks after a pressure stall
+
     # ------------------------------------------------------------------
     # One-time topology precomputation
     # ------------------------------------------------------------------
@@ -235,6 +245,10 @@ class Solver(SolverProtocol):
         lambda_orth = np.sqrt(dot_Sf_Sf) / np.maximum(self.magDf[f_int], 1e-10)
         self._lambda_int = np.clip(lambda_raw, lambda_orth, 5.0 * lambda_orth)
         n_clamped = int(np.sum(self._lambda_int != lambda_raw))
+        # Static (set once at mesh load, not per-iteration) — surfaced
+        # alongside the per-iteration counters below.
+        self._n_lambda_clamped = n_clamped
+        self._n_lambda_faces   = len(lambda_raw)
         if n_clamped:
             n_neg = int(np.sum(dot_df_Sf <= 0.0))
             print(f"  [topology] lambda_int clamped on {n_clamped}/{len(lambda_raw)} "
@@ -330,6 +344,7 @@ class Solver(SolverProtocol):
         if info != 0:
             x, info = bicgstab(A, b, x0=x0, M=M, rtol=1e-2, atol=0.0, maxiter=200)
             if info != 0:
+                self._n_stall_mom += 1
                 print(f"  BiCGSTAB [{cache_key}] stalled (info={info}), "
                       f"res={np.linalg.norm(A @ x - b):.2e}")
         return x
@@ -367,7 +382,8 @@ class Solver(SolverProtocol):
                 # corrupts the pressure field. Pay for a direct solve instead.
                 rel_res = (np.linalg.norm(A @ x - b)
                            / max(np.linalg.norm(b), 1e-300))
-                self._n_pressure_direct = getattr(self, '_n_pressure_direct', 0) + 1
+                self._n_stall_pressure  += 1
+                self._n_pressure_direct += 1
                 print(f"  BiCGSTAB [pressure] stalled (info={info}, "
                       f"rel_res={rel_res:.2e}) — direct solve fallback "
                       f"(#{self._n_pressure_direct} this run).")
@@ -525,6 +541,8 @@ class Solver(SolverProtocol):
                 'u_rms':    res_u_rms,
                 'v_rms':    res_v_rms,
             },
+            # --- Cumulative diagnostic counters, consumed by SolverPanel ---
+            'diagnostics': self._diagnostics_snapshot(),
             # --- Raw arrays for finalize() — prefixed to avoid collisions ---
             '_b_p': b_p,
             '_r_u': r_u,
@@ -552,6 +570,22 @@ class Solver(SolverProtocol):
             'res_mom':  self._live_res_mom.copy(),
         }
 
+    def _diagnostics_snapshot(self) -> dict:
+        """Cumulative counters for events that used to be stdout-only prints:
+        velocity clipping, BiCGSTAB stalls, and the pressure direct-solve
+        fallback (all per-iteration), plus the one-time non-orthogonality
+        lambda clamp from mesh setup. Read by SolverPanel each step and by
+        results.extra after finalize()."""
+        return {
+            'n_clip_events':     self._n_clip_events,
+            'n_clip_cells':      self._n_clip_cells,
+            'n_stall_mom':       self._n_stall_mom,
+            'n_stall_pressure':  self._n_stall_pressure,
+            'n_pressure_direct': self._n_pressure_direct,
+            'n_lambda_clamped':  self._n_lambda_clamped,
+            'n_lambda_faces':    self._n_lambda_faces,
+        }
+
     @property
     def results(self) -> SolverResults:
         """SolverProtocol: final post-solve fields, valid after finalize()."""
@@ -560,6 +594,7 @@ class Solver(SolverProtocol):
             P=self.P,
             res_cont=self.final_res_cont,
             res_mom=self.final_res_mom,
+            extra={'diagnostics': self._diagnostics_snapshot()},
         )
 
     # ------------------------------------------------------------------
@@ -749,6 +784,8 @@ class Solver(SolverProtocol):
         # Never trust a result produced while this warning is firing.
         n_clip = int(np.sum((np.abs(u_star) > v_max) | (np.abs(v_star) > v_max)))
         if n_clip:
+            self._n_clip_events += 1
+            self._n_clip_cells  += n_clip
             print(f"  [step {self._iteration}] WARNING: u* clipped in {n_clip} "
                   f"cells (|u| > {v_max:.3g} m/s) — solution untrustworthy "
                   f"while this fires.")

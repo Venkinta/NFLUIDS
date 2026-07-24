@@ -205,6 +205,7 @@ Implements `SolverProtocol`. Three surgical changes from the previous synchronou
 - `_lambda_int` clamped to `[1, 5]×` the orthogonal value `|Sf|/|df|` (was unbounded and could go negative on skewed pairs, destroying the p'-matrix M-property); `_T_int` computed after the clamp absorbs the remainder explicitly.
 - `_solve_pressure` falls back to a direct `spsolve` when BiCGSTAB stalls twice, instead of silently accepting the stalled iterate (`_n_pressure_direct` counts fallbacks). pyamg is now a hard dependency so the AMG preconditioner path actually runs.
 - Convergence: `cont_rms` is compared against `tolerance × total inlet mass flux` (relative, mesh-independent). `GET_VAR_STAR` warns loudly when the 5×|U_in| clip fires — a clipped run is untrustworthy.
+- **v1.12.0:** the clip/stall/clamp counters above (`_n_clip_events`/`_n_clip_cells`, `_n_stall_mom`/`_n_stall_pressure`, `_n_pressure_direct`, `_n_lambda_clamped`/`_n_lambda_faces`) used to only reach a terminal via `print()`. `_diagnostics_snapshot()` bundles them into a dict returned as `step()`'s `'diagnostics'` key (read live by `SolverPanel`) and as `results.extra['diagnostics']` (read by scripts via `api.run_solve`). The `print()` calls are unchanged — `verbose=False` in the scripting API still suppresses them via `redirect_stdout` — this only adds a second, structured channel for the same events.
 - `Solve()` is now a thin ~20-line wrapper around `step()`, kept purely for backward compatibility with any caller that wants a blocking, non-threaded solve.
 - The old loop body became `step(**state)`. It returns the opaque solver state dict (`a_P_u`, `a_P_v`, `initial_cont_rms`, ...) plus the protocol-required `'residuals'`/`'converged'` keys, plus underscore-prefixed raw arrays (`'_b_p'`, `'_r_u'`, `'_r_v'`) that `finalize()` picks up. `finalize(**final_state)` extracts those into `self.final_res_cont` / `self.final_res_mom` (cell-level arrays consumed by `Visualizer`) — the leading underscore avoids colliding with the solver's own state keys. `step()` also refreshes `self._live_res_cont`/`self._live_res_mom` (same `abs(b_p)` / `sqrt(r_u²+r_v²)` formulas as `finalize()`, just computed every iteration instead of once at the end) so the live preview can show Continuity/Momentum Error mid-solve, not just Pressure/Velocity. `field_snapshot` returns `.copy()`'d `U`/`P`/`res_cont`/`res_mom` on every call so the solver thread can't corrupt a snapshot the main thread is still reading.
 
@@ -221,6 +222,7 @@ Wraps a `SolverProtocol` instance and runs it on a background thread so the UI n
 - `resume()` sets `self.state = "RUNNING"` in addition to clearing `_pause_event` — this is required for the Pause/Resume button and status badge to flip correctly. Without it, `self.state` only ever leaves `"PAUSED"` when the thread reports a terminal message (`converged`/`max_iters`/`diverged`), so Resume looked broken (badge stuck on "PAUSED", button never reverted to "Pause") even though the thread had genuinely resumed stepping.
 - The `'done'` message handler moves state to `"DONE"` from either `"RUNNING"` **or** `"PAUSED"` (not just `"RUNNING"`) — otherwise clicking Stop while paused left `self.state` stuck at `"PAUSED"` forever after the thread actually exited.
 - Thread finalization (`finalize()`) runs exactly once regardless of whether the loop exited via convergence, hitting `max_iterations`, or a user-initiated stop.
+- **v1.12.0:** `_drain_queues()` also stores the latest `'diagnostics'` dict (`self._last_diagnostics`) from each residuals message; `draw()` shows it as a compact block below the residual plots (clip events, BiCGSTAB stalls, mesh non-orthogonality clamp count) instead of requiring a terminal to see them. `'diagnostics'` is read with `.get()` and the whole block is skipped if `None`, so `SolverPanel` stays usable with a future `SolverProtocol` implementation that doesn't report any. Each line is independently gated on its own counter being nonzero — a clean run shows nothing here at all rather than a permanent row of zeros.
 - **By design**, once `self.state` reaches `"DONE"`/`"DIVERGED"` the panel only offers "Open Visualizer" — Stop/Pause/+1 Step/Run-to-iter intentionally disappear rather than being shown as inert no-ops. The thread has already exited at that point, and making those controls *actually* resume iterating would require persisting `last_result`/`iteration` across thread restarts and suppressing the immediate re-trigger of the convergence check (`converged = iteration > 50 and res_cont_rms < tolerance` fires again on the very next step once you're already under tolerance). That's a real change to the solve-loop's control flow, not a UI tweak — deliberately left alone.
 
 ---
@@ -458,9 +460,9 @@ Solver.step(**state) → one SIMPLE iteration
   ├── ASSEMBLE_PRESSURE_CORRECTION()
   ├── GET_VAR_CORRECTED() → p'
   ├── CORRECT_PRESSURE_AND_VELOCITY()
-  └── returns {..solver state.., 'residuals': {...}, 'converged': bool}
+  └── returns {..solver state.., 'residuals': {...}, 'diagnostics': {...}, 'converged': bool}
 Solver.finalize(**final_state) → final_res_cont / final_res_mom for Visualizer
-Solver.results → SolverResults(U, P, res_cont, res_mom, extra={})  # what app_state.py reads post-solve
+Solver.results → SolverResults(U, P, res_cont, res_mom, extra={'diagnostics': {...}})  # what app_state.py reads post-solve
 ```
 `Solve()` still exists as a thin wrapper that loops over `step()` for callers that want a blocking, non-threaded solve.
 

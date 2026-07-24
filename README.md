@@ -85,7 +85,7 @@ Clicking **"Solve"** launches the solver on a background thread, so the UI stays
 - BiCGSTAB with Jacobi (momentum) and ILU/PyAMG (pressure) preconditioners.
 - Convergence is measured by RMS continuity residual (default tolerance: 1e-6).
 
-A live **Solver Monitor** panel shows continuity and momentum RMS residual plots (log10) updated every frame, the current iteration count, and pause / step-one / stop controls. The mesh itself is colored live, refreshed every `viz_interval` iterations (configurable in Solver Settings) — a "Show" dropdown in the monitor lets you switch between Pressure, Velocity, Continuity Error, and Momentum Error while the solve is still running, same as the post-solve Visualizer.
+A live **Solver Monitor** panel shows continuity and momentum RMS residual plots (log10) updated every frame, the current iteration count, and pause / step-one / stop controls. The mesh itself is colored live, refreshed every `viz_interval` iterations (configurable in Solver Settings) — a "Show" dropdown in the monitor lets you switch between Pressure, Velocity, Continuity Error, and Momentum Error while the solve is still running, same as the post-solve Visualizer. The panel also surfaces solver-health counters that used to only print to the terminal — velocity-clip events, linear-solver (BiCGSTAB) stalls, and how many mesh faces needed non-orthogonality clamping at startup — so a run that's technically converging but quietly relying on fallback numerics doesn't go unnoticed. Each counter only appears once it actually fires; a clean run shows nothing extra.
 
 ### 4. Visualize Results (VISUALIZER)
 - Switch between **Pressure**, **Velocity**, **Continuity Error**, and **Momentum Error** fields.
