@@ -64,6 +64,11 @@ class SolverPanel:
         self._last_u    = float('nan')
         self._last_v    = float('nan')
 
+        # Latest cumulative diagnostic counters (clip/stall/clamp events) —
+        # None if the solver doesn't report any (diagnostics is optional,
+        # SolverPanel stays solver-agnostic per SolverProtocol's contract).
+        self._last_diagnostics = None
+
         # ImGui plot_lines buffers — log10 float32 arrays rebuilt each drain
         self._plot_cont = np.zeros(0, dtype=np.float32)
         self._plot_u    = np.zeros(0, dtype=np.float32)
@@ -139,9 +144,10 @@ class SolverPanel:
 
             # 4. Push residuals to main thread
             self._res_queue.put({
-                'type':      'residuals',
-                'iteration': iteration,
-                'residuals': result['residuals'],
+                'type':        'residuals',
+                'iteration':   iteration,
+                'residuals':   result['residuals'],
+                'diagnostics': result.get('diagnostics'),
             })
 
             # 5. Periodic live field snapshot (drop oldest if main is behind)
@@ -226,6 +232,7 @@ class SolverPanel:
                 self._last_cont = res.get('cont_rms', float('nan'))
                 self._last_u    = res.get('u_rms',    float('nan'))
                 self._last_v    = res.get('v_rms',    float('nan'))
+                self._last_diagnostics = msg.get('diagnostics')
 
                 self._hist_cont.append(self._last_cont)
                 self._hist_u.append(self._last_u)
@@ -331,6 +338,39 @@ class SolverPanel:
         else:
             imgui.text_colored("Waiting for first iteration...", 0.5, 0.5, 0.5, 1.0)
             imgui.dummy(pw, 180)
+
+        # --- Diagnostic counters (were stdout-only prints before v1.12.0) ---
+        # Each line only appears once its own event has actually fired —
+        # a healthy run shows nothing here at all, rather than a wall of
+        # reassuring zeros to scan past every frame.
+        diag = self._last_diagnostics
+        if diag is not None:
+            n_clip   = diag.get('n_clip_events', 0)
+            n_stall  = diag.get('n_stall_mom', 0) + diag.get('n_stall_pressure', 0)
+            n_direct = diag.get('n_pressure_direct', 0)
+            n_clamp  = diag.get('n_lambda_clamped', 0)
+            n_faces  = diag.get('n_lambda_faces', 0)
+            warn_col = (1.00, 0.55, 0.10, 1.0)
+
+            if n_clip or n_stall or n_clamp:
+                imgui.separator()
+
+                if n_clip:
+                    imgui.text_colored(
+                        f"u* clip events: {n_clip} ({diag.get('n_clip_cells', 0)} cells)",
+                        *warn_col)
+                    imgui.same_line()
+                    imgui.text_colored("(untrustworthy while firing)", 1.0, 0.3, 0.3, 1.0)
+
+                if n_stall:
+                    imgui.text_colored(
+                        f"BiCGSTAB stalls: {n_stall}  (pressure direct-solve fallback: {n_direct})",
+                        *warn_col)
+
+                if n_clamp and n_faces:
+                    imgui.text_colored(
+                        f"Mesh: {n_clamp}/{n_faces} faces non-orthogonality-clamped",
+                        0.7, 0.7, 0.4, 1.0)
 
         imgui.separator()
 

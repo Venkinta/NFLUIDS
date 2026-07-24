@@ -56,6 +56,9 @@ class SolverProtocol(ABC):
         Returns a dict containing at minimum:
             'residuals': dict[str, float]  named scalar metrics for the panel.
             'converged': bool              True if convergence criterion met.
+            'diagnostics': dict[str, int]  optional cumulative event counters
+                (e.g. solver-internal clip/stall counts) shown in the panel
+                if present; omit entirely if the solver has none to report.
             Plus any solver-specific keys, passed back unchanged next call.
 
         Returns None to signal fatal divergence (NaN/Inf detected).
