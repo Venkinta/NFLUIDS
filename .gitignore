@@ -48,3 +48,7 @@ __nbcache__/
 validation/*.png
 validation/*.pdf
 validation/*.fig
+
+# Local AI-assistant instructions (contain private info)
+CLAUDE.md
+.claude/
