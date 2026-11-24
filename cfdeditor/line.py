@@ -12,7 +12,11 @@ class Line:
         self.u_val = 0.0
         self.v_val = 0.0
         self.p_val = 0.0
-        
+        # (vx, vy) [m/s] sliding velocity; only read when boundary_type is
+        # "Moving Wall". Any component normal to the line is dropped by the
+        # solver (no penetration), so only the tangential part has an effect.
+        self.wall_velocity = (0.0, 0.0)
+
     def draw(self, gfx, color=(255, 255, 255), width=1):
         gfx.draw_world_line(self.a, self.b, color, width)
         

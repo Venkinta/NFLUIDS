@@ -72,6 +72,7 @@ class PhysicsEditor:
             "Symmetry":        self.boundary_spacing,
             "Velocity Inlet":  self.boundary_spacing,
             "Pressure Outlet": self.boundary_spacing,
+            "Moving Wall":     self.boundary_spacing,
         }
         self._spacing_linked = True
 
@@ -93,7 +94,7 @@ class PhysicsEditor:
 
         # --- Line Selection State ---
         self.selected_line = None
-        self.boundary_types = ["Wall", "Symmetry", "Velocity Inlet", "Pressure Outlet"]
+        self.boundary_types = ["Wall", "Symmetry", "Velocity Inlet", "Pressure Outlet", "Moving Wall"]
         self.current_line_idx = 0
         
         # --- Re calculator part ---
@@ -108,6 +109,11 @@ class PhysicsEditor:
         # profile is still developing (Poiseuille 36k validation); 1e-8 tracks
         # true convergence.
         self.tolerance      = 1e-8
+        # Stop rule shown in the Solver tab; index into stop_rule_options.
+        self.stop_rule_options = [("Off (run all iterations)", None),
+                                  ("Continuity", "continuity"),
+                                  ("Continuity + velocity change", "continuity+velocity")]
+        self.stop_rule_idx  = 0
         self.viz_interval   = 10       # live field snapshot every N iterations
 
     # ------------------------------------------------------------------
@@ -365,6 +371,18 @@ class PhysicsEditor:
                     "Max iterations", self.max_iterations, step=100, step_fast=500)
                 self.max_iterations = max(1, self.max_iterations)
 
+                _, self.stop_rule_idx = imgui.combo(
+                    "Stop rule", self.stop_rule_idx,
+                    [name for name, _ in self.stop_rule_options])
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("Off (default): always run Max iterations.\n"
+                                      "Continuity: stop when the mass imbalance is below\n"
+                                      "the tolerance. Can stop EARLY on flows with no\n"
+                                      "inlet (cavity) or slow transients.\n"
+                                      "+ velocity change: also requires the velocity field\n"
+                                      "to have stopped changing (safer).\n"
+                                      "The tolerance below only applies to the last two.")
+
                 # Tolerance as a log10 slider: "1e-N" where N = 3..10
                 tol_exp = int(round(-np.log10(max(self.tolerance, 1e-15))))
                 tol_exp = max(3, min(tol_exp, 10))
@@ -450,6 +468,19 @@ class PhysicsEditor:
             if self.selected_line.boundary_type == "Pressure Outlet":
                 _, self.outlet_pressure = imgui.input_float(
                     "Outlet pressure [Pa]", self.outlet_pressure, step=0.1, step_fast=1.0)
+
+            if self.selected_line.boundary_type == "Moving Wall":
+                _, wv = imgui.input_float2(
+                    "Wall velocity (x, y) [m/s]", *self.selected_line.wall_velocity)
+                self.selected_line.wall_velocity = (float(wv[0]), float(wv[1]))
+                if wv[0] == 0.0 and wv[1] == 0.0:
+                    imgui.text_colored("Velocity is zero: this behaves as a plain Wall.",
+                                       1.0, 0.6, 0.2, 1.0)
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("Sliding velocity of THIS line, e.g. the lid in a\n"
+                                      "lid-driven cavity or a Couette plate. Any part\n"
+                                      "normal to the line is ignored (no penetration),\n"
+                                      "so only the tangential component acts.")
 
             imgui.end()
 

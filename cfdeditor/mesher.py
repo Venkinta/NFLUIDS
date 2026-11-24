@@ -142,8 +142,11 @@ class Mesher:
         self.boundary_points = None
         self.thickness_mask  = None
         self.point_bc_mask   = None
+        self.point_wall_velocity = None   # (N,2), aligned with point_bc_mask
         for loop in self.loops:
-            bp, tm, bm = self.create_boundary_points(loop)
+            bp, tm, bm, wv = self.create_boundary_points(loop)
+            self.point_wall_velocity = (wv if self.point_wall_velocity is None
+                                        else np.vstack([self.point_wall_velocity, wv]))
             self.loop_boundary_points.append(bp)
             self.loop_thickness_masks.append(tm)
             self.loop_bc_masks.append(bm)
@@ -340,19 +343,28 @@ class Mesher:
     def create_boundary_points(self, ordered_lines):
         """Sample boundary points along a single ordered loop.
 
-        Returns (points, thickness_mask, bc_tags) arrays for this loop.  The
+        Returns (points, thickness_mask, bc_tags, wall_velocity) arrays for
+        this loop (wall_velocity is (N,2), each point inheriting its line's
+        `wall_velocity`; only meaningful where the tag is Moving Wall).  The
         caller concatenates the per-loop results into the instance attributes
         consumed by solver_data_pipeline().
         """
 
         all_points = []
+        all_wall_vel = []
 
         all_thicknesses = []
 
         all_bc_tags = []
 
 
-        bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2, "Symmetry": 3}
+        bc_map = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Inlet": 1, "Outlet": 2,
+                  "Symmetry": 3, "Moving Wall": 4}
+
+        # A Moving Wall is a real solid surface (needs boundary-layer prisms,
+        # same as Wall) that just has a nonzero tangential velocity target —
+        # see Line.wall_velocity. Symmetry/Inlet/Outlet get no BL.
+        _solid_wall_types = ("Wall", "Moving Wall")
 
         num_l = len(ordered_lines)
 
@@ -389,7 +401,7 @@ class Mesher:
             all_points.append(segment_points)
 
 
-            if line.boundary_type == "Wall":
+            if line.boundary_type in _solid_wall_types:
 
                 seg_thick = np.ones((n_points, 1))
 
@@ -398,7 +410,8 @@ class Mesher:
                 seg_thick = np.zeros((n_points, 1))
 
 
-            if line.boundary_type != "Wall" and prev_line.boundary_type == "Wall":
+            if (line.boundary_type not in _solid_wall_types
+                    and prev_line.boundary_type in _solid_wall_types):
 
                 seg_thick[0] = 1.0
 
@@ -411,10 +424,14 @@ class Mesher:
 
             all_bc_tags.append(seg_tags)
 
+            all_wall_vel.append(np.tile(np.asarray(line.wall_velocity, dtype=np.float64),
+                                        (n_points, 1)))
+
 
         return (np.vstack(all_points),
                 np.vstack(all_thicknesses),
-                np.concatenate(all_bc_tags))
+                np.concatenate(all_bc_tags),
+                np.vstack(all_wall_vel))
 
     def _get_local_r(self, base_r, candidate):
         """Return the effective Steiner spacing at a given candidate point.
@@ -831,13 +848,17 @@ class Mesher:
         miter_lengths = 1.0 / np.maximum(cos_theta, 0.1)
 
         # 3. --- CONSTRAINED CORNER OVERRIDE ---
-        # Look at the point BC tags to find where Wall (0) meets Inlet/Outlet (1 or 2)
+        # Look at the point BC tags to find where a solid wall (Wall=0 or
+        # Moving Wall=4 -- both get boundary-layer prisms and both need this
+        # override at a corner with a non-wall boundary) meets Inlet/Outlet/
+        # Symmetry (1, 2, or 3).
+        _WALL_TAGS = (0, 4)
         for i in range(n):
             current_tag = self.point_bc_mask[i]
             prev_tag = self.point_bc_mask[(i - 1) % n]
-            
-            # Case A: Moving from an Inlet/Outlet to a Wall
-            if prev_tag != 0 and current_tag == 0:
+
+            # Case A: Moving from an Inlet/Outlet/Symmetry to a wall
+            if prev_tag not in _WALL_TAGS and current_tag in _WALL_TAGS:
                 # Force the extrusion vector to point exactly along the previous edge (the Inlet),
                 # picking whichever of the two tangent directions actually agrees with the wall's
                 # own (already correctly-signed, see step 4) interior normal. This used to just
@@ -856,8 +877,8 @@ class Mesher:
                 projection = np.dot(inlet_vector, wall_normal)  # >= 0 by construction above
                 miter_lengths[i] = 1.0 / max(projection, 0.1)
 
-            # Case B: Moving from a Wall to an Inlet/Outlet
-            elif prev_tag == 0 and current_tag != 0:
+            # Case B: Moving from a wall to an Inlet/Outlet/Symmetry
+            elif prev_tag in _WALL_TAGS and current_tag not in _WALL_TAGS:
                 # Force the extrusion vector to point exactly along the current edge (the Inlet);
                 # see Case A above for why the sign is derived from wall_normal rather than assumed.
                 raw_tangent = unit_edges[i]
@@ -1079,6 +1100,7 @@ class Mesher:
         df_wu    = np.zeros((Nf, 2))
         magDf_wu = np.zeros(Nf)
         boundary_tags = np.full(Nf, -1)
+        face_wall_velocity = np.zeros((Nf, 2))   # m/s; nonzero only on Moving Wall faces
 
         print(f"DEBUG: bc_lookup contains {len(bc_lookup)} total boundary edges.")
         print(f"DEBUG: Unique tags found in lookup: {set(bc_lookup.values())}")
@@ -1108,6 +1130,8 @@ class Mesher:
                 tol = self.boundary_spacing
                 if min_dist < tol:
                     boundary_tags[face_idx] = assigned_tag
+                    if assigned_tag == 4:
+                        face_wall_velocity[face_idx] = self.point_wall_velocity[min_idx]
                 else:
                     boundary_tags[face_idx] = 0
 
@@ -1138,8 +1162,9 @@ class Mesher:
             f"wall={np.sum(boundary_tags==0)}, "
             f"inlet={np.sum(boundary_tags==1)}, "
             f"outlet={np.sum(boundary_tags==2)}, "
-            f"internal={np.sum(boundary_tags==-1)})"
-            f"symmetry={np.sum(boundary_tags==3)})")
+            f"internal={np.sum(boundary_tags==-1)}, "
+            f"symmetry={np.sum(boundary_tags==3)}, "
+            f"moving_wall={np.sum(boundary_tags==4)})")
 
         # ----------------------------------------------------------------
         # 5. UNIT CONVERSION  — world units → SI metres
@@ -1190,12 +1215,16 @@ class Mesher:
         # ----------------------------------------------------------------
         # 7. CAD LINES  — so a loaded mesh can be remeshed and its boundary
         #    conditions edited.  Each row: [ax, ay, bx, by, bc_type_idx]
-        #    bc_type_idx: 0=Wall, 1=Velocity Inlet, 2=Pressure Outlet
+        #    bc_type_idx: 0=Wall, 1=Velocity Inlet, 2=Pressure Outlet,
+        #                 3=Symmetry, 4=Moving Wall
+        #    Columns 5,6 = the line's wall_velocity (vx, vy) [m/s].
         # ----------------------------------------------------------------
-        bc_map_rev = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2, "Symmetry": 3}
+        bc_map_rev = {"Wall": 0, "Velocity Inlet": 1, "Pressure Outlet": 2,
+                      "Symmetry": 3, "Moving Wall": 4}
         cad_lines = np.array([
             [line.a.x, line.a.y, line.b.x, line.b.y,
-             bc_map_rev.get(line.boundary_type, 0)]
+             bc_map_rev.get(line.boundary_type, 0),
+             line.wall_velocity[0], line.wall_velocity[1]]
             for line in self.lines
         ], dtype=np.float64)
 
@@ -1212,6 +1241,7 @@ class Mesher:
             'cell_centers': cell_centers_si,
             'cell_areas':   cell_areas_si,
             'boundary_tags': boundary_tags,
+            'face_wall_velocity': face_wall_velocity,
             'cell_vertices': cell_vertices,
             'cell_nverts':   cell_nverts,
             'cell_types':    cell_types,

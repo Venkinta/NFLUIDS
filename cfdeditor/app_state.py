@@ -53,13 +53,16 @@ def _apply_loaded_mesh_settings(physicseditor, loaded, vbos):
     save, both carry the same mesh-side keys). Shared by both the "Load
     Mesh" and "Load Visualization" flows so returning to PHYSICS afterward
     always shows a consistent, populated state. Returns the new `vbos` dict."""
-    bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet", "Symmetry"]
+    bc_names = ["Wall", "Velocity Inlet", "Pressure Outlet", "Symmetry", "Moving Wall"]
     cad = loaded['cad_lines']
     lines = []
     for row in cad:
-        ax, ay, bx, by, bc_idx = row
+        ax, ay, bx, by, bc_idx = row[:5]
         line = Line(Point(ax, ay), Point(bx, by))
         line.boundary_type = bc_names[int(bc_idx)]
+        # Rows saved before per-line wall velocity existed have only 5 columns.
+        if len(row) >= 7:
+            line.wall_velocity = (float(row[5]), float(row[6]))
         lines.append(line)
     physicseditor.lines = lines
 
@@ -239,6 +242,7 @@ def update_physics(ctx):
             alpha_p       = physicseditor.alpha_p,
             max_iterations= physicseditor.max_iterations,
             tolerance     = physicseditor.tolerance,
+            stop_rule     = physicseditor.stop_rule_options[physicseditor.stop_rule_idx][1],
         )
         ctx.solver_panel = SolverPanel(
             ctx.solver,

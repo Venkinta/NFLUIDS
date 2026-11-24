@@ -12,9 +12,15 @@ from .solver_protocol import SolverProtocol, SolverResults
 # -------------------------------------------
 # 1. spsolve (SuperLU direct, O(N^1.5)) replaced by bicgstab + cached ILU
 #    preconditioner (O(N * k)).  For 200k cells this changes the solver from
-#    hours to minutes.  Loose tolerance (1e-3) is intentional: SIMPLE's outer
-#    pressure-velocity loop is what drives overall convergence; tight inner
-#    solves waste time without improving stability.
+#    hours to minutes.  Loose tolerance (1e-3) is intentional EARLY: SIMPLE's
+#    outer pressure-velocity loop drives convergence while the solution is
+#    far from steady, and tight inner solves just waste time.  But the
+#    momentum tolerance is relative to ||b|| (dominated by the relaxation
+#    term ~ U), while the physical balance shrinks like h^2 -- near
+#    convergence a fixed 1e-3 lets the solve stop with an error as large as
+#    the signal (measured: lid-driven cavity 64x64 core u -0.177 vs -0.196
+#    tight; the error GREW with refinement).  So the momentum rtol now
+#    tightens with the outer residual -- see Solver._mom_rtol.
 # 2. np.add.at replaced by np.bincount everywhere.  add.at disables NumPy's
 #    fast paths; bincount runs in C with no GIL overhead.
 # 3. All topology / index arrays precomputed once in __init__ and reused.
@@ -30,6 +36,12 @@ from .solver_protocol import SolverProtocol, SolverResults
 
 
 class Solver(SolverProtocol):
+    # Built-in stop rules (see __init__). The old behaviour -- continuity-only,
+    # normalised by inlet flux, scale silently 1.0 with no inlet -- fired at
+    # iteration 51-66 on a lid-driven cavity / zero-net-flow Couette with the
+    # answer 7% / 50% off. That is why stopping is now opt-in.
+    STOP_RULES = ("off", "continuity", "continuity+velocity")
+
     """
         Solver receives handout from mesher/physics selector with dictionary of geometric information:
             return {
@@ -87,13 +99,32 @@ class Solver(SolverProtocol):
     """
     def __init__(self, mesher_data, inlet_velocity, outlet_pressure, rho, viscosity,
                  alpha_u: float = 0.7, alpha_p: float = 0.3,
-                 max_iterations: int = 1600, tolerance: float = 1e-8):
+                 max_iterations: int = 1600, tolerance: float = 1e-8,
+                 stop_rule=None):
+        """stop_rule: when to stop iterating before `max_iterations`.
+            None / "off"            -- never; always run max_iterations (DEFAULT).
+                                       Stopping is a modelling decision, and a
+                                       bad rule silently returns an unconverged
+                                       answer (see STOP_RULES below).
+            "continuity"            -- continuity RMS / driving-flux scale < tolerance.
+            "continuity+velocity"   -- the above AND max|dU| per iteration / U_ref
+                                       < 100*tolerance (U_ref = max(|inlet|, wall speed)).
+            callable(info) -> bool  -- your own rule. `info` is a dict: iteration,
+                                       cont_rms, cont_rel, dU_rel, u_rms, v_rms,
+                                       tolerance, solver (the Solver itself, so
+                                       info['solver'].U / .P are available).
+        An unknown string raises ValueError (a typo must not mean "off").
+        """
         # --- Solver parameters (now tunable from PhysicsEditor) ---
         self.alpha_u       = alpha_u   # velocity under-relaxation
         self.alpha_p       = alpha_p   # pressure under-relaxation
         self.max_iterations = max_iterations
         self.tolerance     = tolerance
-                
+        if not (stop_rule is None or callable(stop_rule) or stop_rule in self.STOP_RULES):
+            raise ValueError(f"unknown stop_rule {stop_rule!r}; use one of "
+                             f"{self.STOP_RULES}, None, or a callable")
+        self.stop_rule     = None if stop_rule == "off" else stop_rule
+
         # ---Physical parameters---
         self.inlet_velocity  = np.asarray(inlet_velocity, dtype=np.float64)
         self.outlet_pressure = float(outlet_pressure)
@@ -121,11 +152,35 @@ class Solver(SolverProtocol):
         self.cell_areas   = mesh['cell_areas']
 
         #id's
-        self.wall_faces     = np.where(self.boundary_tags == 0)[0]
+        # Moving Wall (tag 4) is folded into wall_faces — geometrically and
+        # in every equation it IS a wall (no penetration, same diffusive
+        # coupling); only its RHS target velocity differs from a stationary
+        # wall's implicit zero. See _wall_target_U below.
+        self.wall_faces     = np.where((self.boundary_tags == 0) |
+                                        (self.boundary_tags == 4))[0]
         self.symmetry_faces = np.where(self.boundary_tags == 3)[0]
         self.inlet_faces    = np.where(self.boundary_tags == 1)[0]
         self.outlet_faces   = np.where(self.boundary_tags == 2)[0]
         self.internal_faces = np.where(self.boundary_tags == -1)[0]
+
+        # Per-wall-face target velocity: zero for ordinary Wall faces (tag 0),
+        # the owning line's (vx, vy) for Moving Wall faces (tag 4, from the
+        # mesher's 'face_wall_velocity'). The normal component is projected
+        # out (no penetration), so only the tangential part is ever applied.
+        self._wall_target_U = np.zeros((len(self.wall_faces), 2))
+        moving = self.boundary_tags[self.wall_faces] == 4
+        if moving.any():
+            if 'face_wall_velocity' not in mesh:
+                raise ValueError(
+                    "Mesh has Moving Wall faces but no 'face_wall_velocity' "
+                    "(saved before per-line wall velocity existed). Remesh it.")
+            target = np.asarray(mesh['face_wall_velocity'], dtype=np.float64)[self.wall_faces]
+            n_hat  = self.Sf[self.wall_faces] / self.magSf[self.wall_faces, None]
+            target = target - np.sum(target * n_hat, axis=1, keepdims=True) * n_hat
+            self._wall_target_U[moving] = target[moving]
+        # Largest prescribed boundary speed; scales the u* clip limit.
+        self._max_wall_speed = float(np.max(np.linalg.norm(self._wall_target_U, axis=1),
+                                            initial=0.0))
 
         print("--- MESH SANITY CHECK ---")
         print(f"Total Cells:    {self.Nc}")
@@ -149,12 +204,31 @@ class Solver(SolverProtocol):
         # depth]. The convergence check compares cont_rms against
         # tolerance * this scale, so `tolerance` means the same thing on a
         # 3k mesh and a 135k mesh (absolute per-face fluxes shrink with h).
-        self._mflux_scale = float(np.sum(np.abs(
-            self.rho * np.einsum('fj,j->f', self._Sf_in, self.inlet_velocity)))) or 1.0
+        # With no inlet flux the moving wall is what drives the flow, so its
+        # speed x length is the scale instead. Never a silent 1.0: a built-in
+        # rule that needs a scale and has none raises right here.
+        inlet_flux = float(np.sum(np.abs(
+            self.rho * np.einsum('fj,j->f', self._Sf_in, self.inlet_velocity))))
+        self._u_ref = max(float(np.linalg.norm(self.inlet_velocity)), self._max_wall_speed)
+        if inlet_flux > 0.0:
+            self._mflux_scale = inlet_flux
+        else:
+            self._mflux_scale = (self.rho * self._max_wall_speed *
+                                 float(np.sum(self.magSf[self.boundary_tags == 4])))
+        if (self.stop_rule in ("continuity", "continuity+velocity")
+                and (self._mflux_scale <= 0.0 or self._u_ref <= 0.0)):
+            raise ValueError(
+                f"stop_rule={self.stop_rule!r} needs a driving scale, but there is "
+                "no inlet velocity and no Moving Wall speed. Use stop_rule=None "
+                "(run max_iterations) or pass your own callable.")
 
         # Iterative solver state
         self._precond_cache    = {}
         self._precond_interval = 50   # rebuild ILU every N SIMPLE iterations
+        # Momentum BiCGSTAB relative tolerance. Starts loose (cheap, fine while
+        # the outer loop is far from converged) and is tightened at the end of
+        # every step() from the outer continuity residual -- see step().
+        self._mom_rtol         = 1e-3
         self._iteration        = 0
         self._last_grad_P      = None  # cached for health_check
 
@@ -340,9 +414,11 @@ class Solver(SolverProtocol):
         M  = LinearOperator(A.shape, matvec=lambda x: x / diag, dtype=np.float64)
         x0 = b / diag
 
-        x, info = bicgstab(A, b, x0=x0, M=M, rtol=1e-3, atol=0.0, maxiter=300)
+        x, info = bicgstab(A, b, x0=x0, M=M, rtol=self._mom_rtol, atol=0.0, maxiter=300)
         if info != 0:
-            x, info = bicgstab(A, b, x0=x0, M=M, rtol=1e-2, atol=0.0, maxiter=200)
+            # Retry 10x looser (never above 1e-2); a stall is counted and printed.
+            x, info = bicgstab(A, b, x0=x0, M=M, rtol=min(10.0 * self._mom_rtol, 1e-2),
+                               atol=0.0, maxiter=200)
             if info != 0:
                 self._n_stall_mom += 1
                 print(f"  BiCGSTAB [{cache_key}] stalled (info={info}), "
@@ -433,8 +509,12 @@ class Solver(SolverProtocol):
                 break
         else:
             if last_result:
-                print(f"\n  Did not converge in {max_iterations} iterations — "
-                      f"final Cont(RMS) = {last_result['residuals']['cont_rms']:.2e}")
+                if self.stop_rule is None:
+                    print(f"\n  Ran all {max_iterations} iterations (stop rule off) — "
+                          f"final Cont(RMS) = {last_result['residuals']['cont_rms']:.2e}")
+                else:
+                    print(f"\n  Did not converge in {max_iterations} iterations — "
+                          f"final Cont(RMS) = {last_result['residuals']['cont_rms']:.2e}")
 
         if last_result is not None:
             self.finalize(**last_result)
@@ -442,6 +522,26 @@ class Solver(SolverProtocol):
     # ------------------------------------------------------------------
     # SolverProtocol implementation
     # ------------------------------------------------------------------
+
+    def _stop_rule_met(self, iteration, cont_rms, dU_rel, u_rms, v_rms):
+        rule = self.stop_rule
+        if rule is None:
+            return False
+        scale = self._mflux_scale
+        cont_rel = cont_rms / scale if scale > 0.0 else float('inf')
+        if callable(rule):
+            return bool(rule(dict(iteration=iteration, cont_rms=cont_rms,
+                                  cont_rel=cont_rel, dU_rel=dU_rel,
+                                  u_rms=u_rms, v_rms=v_rms,
+                                  tolerance=self.tolerance, solver=self)))
+        if iteration <= 50:
+            return False
+        cont_ok = cont_rel < self.tolerance
+        if rule == "continuity":
+            return cont_ok
+        # "continuity+velocity": the remaining error is ~100-1000x the
+        # per-iteration velocity change (measured on cavity/Couette/channel).
+        return cont_ok and dU_rel < 100.0 * self.tolerance
 
     def step(self, **state):
         """SolverProtocol: one SIMPLE outer iteration.
@@ -520,14 +620,23 @@ class Solver(SolverProtocol):
         if initial_cont_rms is None:
             initial_cont_rms = max(res_cont_rms, 1e-16)
 
+        # Tighten the NEXT step's momentum solve as the outer loop converges:
+        # 1% of the continuity residual's reduction so far, clamped to
+        # [1e-10, 1e-3]. Continuity is used (not the momentum residual)
+        # because the momentum residual is itself floored by this tolerance.
+        self._mom_rtol = float(np.clip(
+            1e-2 * res_cont_rms / initial_cont_rms, 1e-10, 1e-3))
+
         if iteration % 10 == 0:
             self.health_check(iteration, a_P_u)
 
         # Relative test: cont_rms scales with per-face mass flux (shrinks with
         # cell size), so an absolute threshold means different physical
         # accuracy on every mesh. Normalize by the total inlet mass flux.
-        converged = (iteration > 50 and
-                     res_cont_rms / self._mflux_scale < self.tolerance)
+        dU_rel = (float(np.max(np.abs(self.U - self.U_old))) / self._u_ref
+                  if self._u_ref > 0.0 else float('inf'))
+        converged = self._stop_rule_met(iteration, res_cont_rms, dU_rel,
+                                        res_u_rms, res_v_rms)
 
         return {
             # --- Persistent solver state (passed back on next call) ---
@@ -761,6 +870,14 @@ class Solver(SolverProtocol):
             b += np.bincount(own_in,
                              weights=(D_in - F_in) * self.inlet_velocity[axis],
                              minlength=self.Nc)
+            # Moving Wall: same diffusive-flux-to-a-target-velocity form as
+            # the inlet term above, minus the advective part (F=0 at any
+            # wall — no penetration). Zero for ordinary Wall faces since
+            # _wall_target_U is zero there, so this is a no-op unless a
+            # Moving Wall is actually present.
+            b += np.bincount(own_w,
+                             weights=D_w * self._wall_target_U[:, axis],
+                             minlength=self.Nc)
 
         # Under-relaxation — applied to the shared matrix and both RHS
         a_P     = A.diagonal().copy()
@@ -778,7 +895,11 @@ class Solver(SolverProtocol):
     def GET_VAR_STAR(self, A_mom, b_x, b_y):
         u_star = self._solve_momentum(A_mom, b_x, 'mom_u')
         v_star = self._solve_momentum(A_mom, b_y, 'mom_v')
-        v_max  = np.linalg.norm(self.inlet_velocity) * 5.0
+        # Scaled off whichever prescribed velocity is larger — a Couette/
+        # lid-driven case with no inlet (inlet_velocity == 0) would otherwise
+        # get v_max == 0 and clip every cell to zero on the very first step.
+        v_max  = 5.0 * max(np.linalg.norm(self.inlet_velocity),
+                            self._max_wall_speed, 1e-6)
         # The clip below keeps a blow-up finite, but it also HIDES it: a
         # diverging run shows plausible velocities while pressure runs away.
         # Never trust a result produced while this warning is firing.

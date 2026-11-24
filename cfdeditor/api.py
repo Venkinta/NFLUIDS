@@ -38,7 +38,8 @@ _MESH_CTOR_KEYS = (
 )
 
 _SOLVER_REQUIRED_KEYS = ('inlet_velocity', 'outlet_pressure', 'rho', 'viscosity')
-_SOLVER_OPTIONAL_KEYS = ('alpha_u', 'alpha_p', 'max_iterations', 'tolerance')
+_SOLVER_OPTIONAL_KEYS = ('alpha_u', 'alpha_p', 'max_iterations', 'tolerance',
+                          'stop_rule')
 
 
 class SolveDiverged(RuntimeError):
@@ -74,7 +75,11 @@ def run_solve(lines, mesh_params, solver_params, smooth_params=None, verbose=Tru
         bc_spacing_map (see Mesher docstring for each).
     solver_params: kwargs for Solver.__init__ — inlet_velocity,
         outlet_pressure, rho, viscosity (required), plus optional alpha_u,
-        alpha_p, max_iterations, tolerance (see Solver docstring for each).
+        alpha_p, max_iterations, tolerance, stop_rule (see Solver
+        docstring for each; stop_rule defaults to None = run all max_iterations,
+        or pass "continuity", "continuity+velocity", or your own callable). Sliding-wall velocity is NOT a solver param: set
+        `line.wall_velocity = (vx, vy)` on each "Moving Wall" line in `lines`
+        (e.g. a lid-driven cavity's top edge).
     smooth_params: optional dict of kwargs for Mesher.smooth_mesh() (passes,
         relaxation, tolerance_deg). If None (default), smoothing is skipped.
     verbose: if False, suppresses the mesh/solve stage-by-stage stdout
@@ -88,13 +93,7 @@ def run_solve(lines, mesh_params, solver_params, smooth_params=None, verbose=Tru
     unknown = set(mesh_params) - set(_MESH_CTOR_KEYS)
     if unknown:
         raise TypeError(f"run_solve: unknown mesh_params keys {sorted(unknown)}")
-
-    missing = set(_SOLVER_REQUIRED_KEYS) - set(solver_params)
-    if missing:
-        raise TypeError(f"run_solve: missing required solver_params keys {sorted(missing)}")
-    unknown = set(solver_params) - set(_SOLVER_REQUIRED_KEYS) - set(_SOLVER_OPTIONAL_KEYS)
-    if unknown:
-        raise TypeError(f"run_solve: unknown solver_params keys {sorted(unknown)}")
+    _check_solver_params(solver_params)
 
     sink = contextlib.redirect_stdout(io.StringIO()) if not verbose else contextlib.nullcontext()
     with sink:
@@ -103,17 +102,42 @@ def run_solve(lines, mesh_params, solver_params, smooth_params=None, verbose=Tru
         if smooth_params is not None:
             mesher.smooth_mesh(**smooth_params)
         mesh_data = mesher.solver_data_pipeline()
+        solver = _run_solver(mesh_data, solver_params)
 
-        inlet_velocity = solver_params['inlet_velocity']
-        outlet_pressure = solver_params['outlet_pressure']
-        rho = solver_params['rho']
-        viscosity = solver_params['viscosity']
-        solver_kwargs = {k: v for k, v in solver_params.items()
-                          if k not in _SOLVER_REQUIRED_KEYS}
+    return _finish(solver, mesh_data)
 
-        solver = Solver(mesh_data, inlet_velocity, outlet_pressure, rho, viscosity, **solver_kwargs)
-        solver.Solve()
 
+def solve_mesh_data(mesh_data, solver_params, verbose=True):
+    """Solve on an already-built mesh dict (e.g. from
+    structured_mesh.structured_rect_mesh() or meshIO) and return a SolveHandle.
+    Same solver_params contract and failure behaviour as run_solve()."""
+    _check_solver_params(solver_params)
+    sink = contextlib.redirect_stdout(io.StringIO()) if not verbose else contextlib.nullcontext()
+    with sink:
+        solver = _run_solver(mesh_data, solver_params)
+    return _finish(solver, mesh_data)
+
+
+def _check_solver_params(solver_params):
+    missing = set(_SOLVER_REQUIRED_KEYS) - set(solver_params)
+    if missing:
+        raise TypeError(f"run_solve: missing required solver_params keys {sorted(missing)}")
+    unknown = set(solver_params) - set(_SOLVER_REQUIRED_KEYS) - set(_SOLVER_OPTIONAL_KEYS)
+    if unknown:
+        raise TypeError(f"run_solve: unknown solver_params keys {sorted(unknown)}")
+
+
+def _run_solver(mesh_data, solver_params):
+    solver_kwargs = {k: v for k, v in solver_params.items()
+                     if k not in _SOLVER_REQUIRED_KEYS}
+    solver = Solver(mesh_data, solver_params['inlet_velocity'],
+                    solver_params['outlet_pressure'], solver_params['rho'],
+                    solver_params['viscosity'], **solver_kwargs)
+    solver.Solve()
+    return solver
+
+
+def _finish(solver, mesh_data):
     if not hasattr(solver, 'final_res_cont'):
         raise SolveDiverged(
             "solver diverged before completing a single step() — no valid "

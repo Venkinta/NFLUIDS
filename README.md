@@ -16,6 +16,8 @@ The solver is verified against the analytical plane-Poiseuille solution (ρ=1000
 
 on a 5,706-cell quad-dominant mesh. Reproduce with the suite in [`validation/`](validation/) (`validate_all`).
 
+**Lid-driven cavity (Re = 100) vs. Ghia et al. (1982)**, uniform quad grid, `validation/cavity_ghia.py`: primary-vortex ψ and vorticity errors of 3.8%/3.7% at 64×64 and 1.9%/1.8% at 128×128 — halving with each refinement, as a first-order upwind scheme should. **Couette flow** (`validation/couette.py`): moving-wall cases reproduce the exact linear profile to ~5e-4% of the wall speed. (Reference values were transcribed by hand; verify them against the paper before citing.)
+
 **A note on mesh topology:** on hybrid meshes, thin interior triangles meeting the prismatic boundary layer inject a systematic **~+4.5% wall-drag error that does not reduce with refinement** — the error enters at the quad/triangle seam and offsets the whole boundary-layer stack. A 5,706-cell quad-dominant mesh reaches 0.11% dp/dx where a 36,026-cell hybrid mesh reaches only 6.4%. **For wall-bounded flows where wall shear or pressure drop matters, prefer quad-dominant meshes.** See `validation/` for the measurements.
 
 ## Quick Start
@@ -58,7 +60,7 @@ From Visualize you can also go straight back to **(PHYSICS)** — the mesh, boun
 
 ### 2. Assign Boundary Conditions (PHYSICS)
 - **Click** any line to select it and open its properties panel.
-- Assign each line a **boundary type**: `Wall`, `Velocity Inlet`, or `Pressure Outlet`.
+- Assign each line a **boundary type**: `Wall`, `Symmetry`, `Velocity Inlet`, `Pressure Outlet`, or `Moving Wall`. A `Moving Wall` is a no-slip wall that slides at its own (x, y) velocity, set per line (lid-driven cavity, Couette flow). With no outlet at all (a closed cavity) the solver pins the reference pressure automatically.
 - Configure **fluid properties** (density, viscosity).
 - Configure **mesh parameters** (boundary layer settings, mesh size).
 - Configure **Solver Settings** (relaxation factors `alpha_u`/`alpha_p`, max iterations, convergence tolerance, live-viz update interval).
@@ -83,7 +85,7 @@ normal solve, with the mesh/BCs available for editing and re-solving.
 Clicking **"Solve"** launches the solver on a background thread, so the UI stays responsive throughout. It uses the **SIMPLE algorithm** with:
 - Rhie-Chow interpolation for pressure-velocity coupling.
 - BiCGSTAB with Jacobi (momentum) and ILU/PyAMG (pressure) preconditioners.
-- Convergence is measured by RMS continuity residual (default tolerance: 1e-6).
+- **Stop rule: off by default** — a solve runs all `max_iterations`. Pick **Continuity** or **Continuity + velocity change** in the Solver tab to stop early (the second also requires the velocity field to have stopped changing, which the first can miss on flows with no inlet, e.g. a lid-driven cavity). Scripting: `stop_rule=None | "continuity" | "continuity+velocity" | your_callable(info)->bool`, where `info` carries `iteration, cont_rms, cont_rel, dU_rel, u_rms, v_rms, tolerance, solver`.
 
 A live **Solver Monitor** panel shows continuity and momentum RMS residual plots (log10) updated every frame, the current iteration count, and pause / step-one / stop controls. The mesh itself is colored live, refreshed every `viz_interval` iterations (configurable in Solver Settings) — a "Show" dropdown in the monitor lets you switch between Pressure, Velocity, Continuity Error, and Momentum Error while the solve is still running, same as the post-solve Visualizer. The panel also surfaces solver-health counters that used to only print to the terminal — velocity-clip events, linear-solver (BiCGSTAB) stalls, and how many mesh faces needed non-orthogonality clamping at startup — so a run that's technically converging but quietly relying on fallback numerics doesn't go unnoticed. Each counter only appears once it actually fires; a clean run shows nothing extra.
 
@@ -205,6 +207,7 @@ Optional but recommended: `pip install pyamg` for faster pressure solves.
 | `meshIO.py` | Save/Load mesh (and, via the same generic dict format, full visualizations) to/from compressed `.npz` files; also save/load a solve's `SolverResults` on its own |
 | `vtuIO.py` | Export mesh + solved fields as a VTK XML UnstructuredGrid (`.vtu`), for cross-validation in ParaView/other CFD codes |
 | `api.py` | Headless scripting entry point: `run_solve()` wraps Mesher → Solver → results for parametric studies |
+| `structured_mesh.py` | Uniform all-quad rectangle mesh in the solver's mesh-dict schema (benchmark/validation cases), solved via `api.solve_mesh_data()` |
 | `geometry_helpers.py` | CAD-free geometry builders (`rect_lines`, `circle_lines`, `polygon_lines`) for scripting |
 | `test_holes.py` | End-to-end test for multi-loop meshing with holes |
 | `test_force_balance.py` | Regression test: discrete force/mass balance on a solved channel |

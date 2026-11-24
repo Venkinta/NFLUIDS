@@ -78,7 +78,8 @@ def main():
 
     print("\n=== SOLVE ===")
     solver = Solver(data, [U_IN, 0.0], 0.0, RHO, MU,
-                     alpha_u=0.7, alpha_p=0.3, max_iterations=1600, tolerance=1e-8)
+                     alpha_u=0.7, alpha_p=0.3, max_iterations=1600, tolerance=1e-8,
+                     stop_rule="continuity+velocity")
     solver.Solve()
 
     owner, tags = solver.owner, solver.boundary_tags
