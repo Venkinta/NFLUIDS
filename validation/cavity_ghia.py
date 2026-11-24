@@ -11,9 +11,12 @@ Geometry is in mm (world units) on purpose: mesher.connect_layers() skips
 boundary-layer quads with a hard-coded world-unit area < 1e-4, so a cavity
 drawn as a 1x1 *world-unit* square silently loses its boundary layer.
 
-NOTE: the reference tables below were transcribed by hand (Ghia 1982,
-Table I / II, Re = 100). Re-check them against the paper before quoting any
-number from this script.
+Reference data: read directly from Ghia, Ghia & Shin, J. Comput. Phys. 48 (1982)
+387-411 (checked 2026-11-24 against the page images): Table I (p. 398) Re=100
+column, Table II (p. 399) Re=100 column, and the vortex-properties table (p. 408)
+Re=100 column. All entries below are exactly as printed. (Page 403's "Table III"
+in that paper is streamline contour levels, not vortex data.) The paper's vorticity
+is positive at the primary vortex (its sign convention); we report |omega|.
 
 Run:  .venv/Scripts/python.exe validation/cavity_ghia.py [spacing_mm] [tri|quad]
 
@@ -54,10 +57,13 @@ GHIA_V = np.array([
     (1.0000, 0.00000), (0.9688, -0.05906), (0.9609, -0.07391), (0.9531, -0.08864),
     (0.9453, -0.10313), (0.9063, -0.16914), (0.8594, -0.22445), (0.8047, -0.24533),
     (0.5000, 0.05454), (0.2344, 0.17527), (0.2266, 0.17507), (0.1563, 0.16077),
-    (0.0938, 0.12317), (0.0781, 0.10890), (0.0625, 0.09233), (0.0000, 0.00000)])
+    (0.0938, 0.12317), (0.0781, 0.10890), (0.0703, 0.10091), (0.0625, 0.09233),
+    (0.0000, 0.00000)])
 
-# Ghia et al. (1982) Re = 100 primary vortex (Table III), from memory -- verify.
+# Ghia et al. (1982) Re = 100, vortex-properties table (p. 408), exactly as printed.
 GHIA_PRIMARY = dict(psi=-0.103423, omega=3.16646, x=0.6172, y=0.7344)
+GHIA_SECONDARY = dict(BL=dict(psi=1.74877e-6, x=0.0313, y=0.0391),
+                      BR=dict(psi=1.25374e-5, x=0.9453, y=0.0625))
 # Extremes of the tabulated centerline profiles above (grid-point values).
 GHIA_EXTREMA = dict(u_min=-0.21090, v_max=0.17527, v_min=-0.24533)
 
@@ -121,7 +127,9 @@ def print_characteristics(c):
     row("v_min on y=0.5", c['v_min'], e['v_min'])
     for k, nm in (("BR", "bottom-right"), ("BL", "bottom-left")):
         psi_c, (xc_, yc_) = c[k]
-        print(f"  secondary {nm:<12} psi={psi_c:.3e} at ({xc_:.4f}, {yc_:.4f})   (no reference loaded)")
+        g = GHIA_SECONDARY[k]
+        print(f"  secondary {nm:<12} psi={psi_c:.4e} at ({xc_:.4f}, {yc_:.4f})   "
+              f"Ghia {g['psi']:.4e} at ({g['x']:.4f}, {g['y']:.4f})  ({100*(psi_c-g['psi'])/g['psi']:+.1f}%)")
 
 
 def main(spacing=2.0, kind="tri"):   # spacing in mm
